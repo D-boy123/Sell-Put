@@ -11,10 +11,10 @@ st.title('📊 Short Put 选股扫描器 (Z-Score 优化多期版)')
 # --- 侧边栏参数设置 ---
 st.sidebar.header('⚙️ 扫描参数设置')
 min_yield = st.sidebar.number_input(
-    '最低年化收益率 (%)', min_value=0.0, max_value=100.0, value=15.0, step=1.0
+    '最低年化收益率 (%)', min_value=0.0, max_value=100.0, value=20.0, step=1.0
 )
 min_gap = st.sidebar.number_input(
-    '最小价差保护 (%)', min_value=0.0, max_value=10.0, value=1.0, step=0.5
+    '最小价差保护 (%)', min_value=0.0, max_value=10.0, value=2.0, step=0.5
 )
 
 # 默认监控池
