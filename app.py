@@ -20,7 +20,7 @@ def load_data():
                 return pd.DataFrame(data)
         except:
             pass
-    # 默认初始数据
+    # 默认初始持仓数据
     return pd.DataFrame([
         {"股票代码": "AAPL", "下单行权价(Strike)": 220.0, "收入权利金(Credit)": 1.50},
         {"股票代码": "TSLA", "下单行权价(Strike)": 240.0, "收入权利金(Credit)": 3.80}
@@ -36,7 +36,7 @@ def save_data(df):
 if 'portfolio_data' not in st.session_state:
     st.session_state.portfolio_data = load_data()
 
-# ================= 2. 行权概率估算函数 =================
+# ================= 2. 行权概率估算函数 (基于 Black-Scholes Delta) =================
 def estimate_itm_probability(ticker_symbol, strike, is_put=True):
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -45,7 +45,7 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
         if not expirations:
             return 0.5
         
-        opt = ticker.option_chain(expirations[0]) # 取最近一个到期日
+        opt = ticker.option_chain(expirations[0]) # 取最近一个到期日进行估算
         calls_or_puts = opt.puts if is_put else opt.calls
         closest_opt = calls_or_puts.iloc[(calls_or_puts['strike'] - strike).abs().argsort()[:1]]
         if closest_opt.empty:
@@ -63,53 +63,89 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
     except:
         return None
 
-# ================= 3. 侧边栏菜单切换 =================
-menu = st.sidebar.selectbox("功能菜单", ["主页分析", "当前持仓"])
+# ================= 3. 侧边栏功能切换菜单 =================
+menu = st.sidebar.selectbox("功能菜单", ["🔍 筛选合适股票", "💼 当前持仓管理", "📈 策略主页简介"])
 
-# ================= 场景一：主页分析 =================
-if menu == "主页分析":
-    st.title("📈 Sell Put (Short Put) 期权策略分析系统")
+# ================= 模块一：🔍 筛选合适股票（完全恢复并保留） =================
+if menu == "🔍 筛选合适股票":
+    st.title("🔍 Sell Put 潜在股票筛选神器")
+    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标，辅助评估其是否适合作为 Sell Put 标的。")
     
-    # 概览卡片
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(label="📊 已录入持仓标的数", value=f"{len(st.session_state.portfolio_data)} 个")
-    with col2:
-        total_credit = st.session_state.portfolio_data["收入权利金(Credit)"].sum() if not st.session_state.portfolio_data.empty else 0
-        st.metric(label="💰 累计锁定权利金", value=f"${total_credit:.2f}")
-    with col3:
-        st.metric(label="⏱️ 策略监测状态", value="实时运行中")
+    # 股票池输入与核心参数设定
+    col_input, col_param = st.columns([2, 1])
+    with col_input:
+        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA, AMD）", "AAPL, TSLA, NVDA")
+    with col_param:
+        min_price = st.number_input("最低股价过滤 ($)", min_value=0.0, value=50.0)
 
-    st.markdown("---")
-    st.subheader("💡 什么是 Sell Put 策略？")
-    st.write(
-        "卖出看跌期权（Sell Put）是一种**顺势赚取现金流**或者**折价建仓**的经典期权策略。 "
-        "当您卖出一个 Put 时，您有义务在股价跌破行权价时，以该行权价买入股票。作为回报，您立即获得一笔权利金（Credit）。"
-    )
-    
-    st.subheader("🛠️ 核心盈利逻辑")
-    st.markdown(
-        """
-        - **时间价值流逝（Theta 损耗）**：只要股价不大幅下跌，期权价值会随时间流逝而归零，卖方全额稳赚权利金。
-        - **股价震荡或上涨**：正股价格上涨或横盘，Put 期权都会变成垃圾归零，策略达成最大利润。
-        - **低价抄底**：即便不幸被行权，您也是以『行权价 - 权利金』的更低成本买入心仪的股票，比直接买现货更划算。
-        """
-    )
-    
-    st.warning(
-        "⚠️ **风险提示**：如果正股遭遇黑天鹅事件暴跌，您必须无条件以行权价接盘，可能产生浮亏。 "
-        "请时刻关注『当前持仓』中的**行权安全垫**和**行权概率**，防止穿仓！"
-    )
+    # 触发筛选按钮
+    if st.button("🚀 开始抓取并筛选数据", type="primary"):
+        tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+        
+        if not tickers:
+            st.error("请输入至少一个股票代码！")
+        else:
+            screen_results = []
+            with st.spinner("正在连线雅虎财经，全面扫描正股指标中..."):
+                for t_sym in tickers:
+                    try:
+                        t_obj = yf.Ticker(t_sym)
+                        info = t_obj.info
+                        fast = t_obj.fast_info
+                        
+                        price = fast['last_price']
+                        
+                        # 过滤低于设定阈值的股票
+                        if price < min_price:
+                            continue
+                            
+                        # 安全提取雅虎财经财务/技术面指标
+                        pe = info.get('trailingPE', np.nan)
+                        pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
+                        
+                        fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
+                        dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
+                        dist_str = f"+{dist_from_low:.1f}%" if pd.notnull(dist_from_low) else "N/A"
+                        
+                        beta = info.get('beta', np.nan)
+                        beta_str = f"{beta:.2f}" if pd.notnull(beta) else "N/A"
+                        
+                        # 简单评估建议（Sell Put 偏好：市盈率健康、波动稳定、距离52周低点有一定安全垫）
+                        if pd.notnull(beta) and beta > 1.5:
+                            advice = "⚠️ 波动剧烈 (高Beta)，权利金高但接盘风险大"
+                        elif pd.notnull(pe) and pe > 50:
+                            advice = "⚠️ 估值偏高 (高PE)，注意高位回撤风险"
+                        else:
+                            advice = "✅ 适合 Sell Put (估值或波动较稳健)"
 
-# ================= 场景二：当前持仓 =================
-elif menu == "当前持仓":
-    st.title("💼 当前持仓管理")
+                        screen_results.append({
+                            "股票代码": t_sym,
+                            "当前股价": f"${price:.2f}",
+                            "市盈率 (PE)": pe_str,
+                            "52周最低价距离": dist_str,
+                            "波动率系数 (Beta)": beta_str,
+                            "策略初评建议": advice
+                        })
+                    except:
+                        screen_results.append({
+                            "股票代码": t_sym, "当前股价": "抓取失败", "市盈率 (PE)": "N/A", "52周最低价距离": "N/A", "波动率系数 (Beta)": "N/A", "策略初评建议": "❌ 无法获取该股票信息"
+                        })
+                        
+            if screen_results:
+                st.subheader("📊 扫描筛选结果透视表")
+                st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
+            else:
+                st.info("没有满足您所设定『最低股价过滤』条件的股票。")
+
+# ================= 模块二：💼 当前持仓管理（今日最新弹窗+永久保存版） =================
+elif menu == "💼 当前持仓管理":
+    st.title("💼 当前持仓动态透视")
+    st.write("您可以在这里查看实时仓位表现、计算安全垫和行权率，并使用底部的弹窗添加或一键删除单子。")
     
     # --- 操作按钮区域：添加新持仓 ---
     if st.button("➕ 添加新持仓（弹窗输入）"):
-        st.dialog("add_position_modal") # 触发 Streamlit 的原生弹窗机制
+        st.dialog("add_position_modal") 
         
-    # 定义弹窗内的内容
     @st.dialog("添加新持仓")
     def add_position_modal():
         st.write("请输入您的新期权单数据：")
@@ -119,27 +155,23 @@ elif menu == "当前持仓":
         
         if st.button("确认保存", use_container_width=True):
             if new_ticker:
-                # 组装新行
                 new_row = pd.DataFrame([{"股票代码": new_ticker, "下单行权价(Strike)": new_strike, "收入权利金(Credit)": new_credit}])
-                # 追加并保存
                 st.session_state.portfolio_data = pd.concat([st.session_state.portfolio_data, new_row], ignore_index=True)
                 save_data(st.session_state.portfolio_data)
-                st.success(f"成功添加 {new_ticker} 持仓！")
-                st.rerun() # 刷新页面
+                st.success(f"成功添加 {new_ticker} 持仓并已本地存档！")
+                st.rerun() 
             else:
                 st.error("请输入有效的股票代码！")
 
     st.markdown("---")
 
-    # --- 核心逻辑：数据读取与展示 ---
     df = st.session_state.portfolio_data
 
     if df.empty:
-        st.info("目前没有持仓数据，请点击上方按钮添加。")
+        st.info("目前没有任何持仓数据，请点击上方按钮录入。")
     else:
-        # 实时抓取行情并计算衍生指标
         results = []
-        with st.spinner("正在获取雅虎财经实时数据并计算行权概率..."):
+        with st.spinner("正在获取实时股价，并利用 Black-Scholes 模型严密推算行权概率..."):
             for index, row in df.iterrows():
                 ticker_str = str(row["股票代码"]).upper().strip()
                 strike = float(row["下单行权价(Strike)"])
@@ -149,15 +181,12 @@ elif menu == "当前持仓":
                     t = yf.Ticker(ticker_str)
                     current_price = t.fast_info['last_price']
                     
-                    # 计算安全垫差异 (%)
                     price_diff_pct = ((current_price - strike) / current_price) * 100
-                    
-                    # 估算行权概率
                     prob = estimate_itm_probability(ticker_str, strike, is_put=True)
                     prob_str = f"{prob*100:.1f}%" if prob is not None else "无法估算"
                     
                     results.append({
-                        "ID": index, # 用于删除标识
+                        "ID": index,
                         "股票代码": ticker_str,
                         "行权价 (Strike)": strike,
                         "权利金 (Credit)": credit,
@@ -167,34 +196,47 @@ elif menu == "当前持仓":
                     })
                 except:
                     results.append({
-                        "ID": index,
-                        "股票代码": ticker_str,
-                        "行权价 (Strike)": strike,
-                        "权利金 (Credit)": credit,
-                        "当前估价 (Current)": "获取失败",
-                        "距行权安全垫 (%)": "N/A",
-                        "预计被行权概率": "N/A"
+                        "ID": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A"
                     })
 
-        # 显示精美结果表格 (非编辑模式)
         res_df = pd.DataFrame(results)
-        display_df = res_df.drop(columns=["ID"]) # 隐藏不美观的ID
-        st.subheader("📊 实时持仓透视表")
+        display_df = res_df.drop(columns=["ID"]) 
+        st.subheader("📊 实时持仓监控盘面")
         st.dataframe(display_df, use_container_width=True)
 
-        # --- 操作区域：单条持仓删除功能 ---
+        # --- 移除单子区域 ---
         st.markdown("---")
-        st.subheader("🗑️ 删除持仓")
+        st.subheader("🗑️ 移除已结清仓位")
         delete_list = [f"{r['股票代码']} (Strike: {r['行权价 (Strike)']})" for r in results]
-        selected_to_delete = st.selectbox("选择要删除的持仓项：", delete_list)
+        selected_to_delete = st.selectbox("选择需要删除的持仓项：", delete_list)
         
         if st.button("🔥 确认删除选中持仓", type="primary"):
-            # 找到选中项对应的原始索引号
             selected_index = delete_list.index(selected_to_delete)
             target_id = results[selected_index]["ID"]
             
-            # 从原始 Session State 中剔除并保存
             st.session_state.portfolio_data = st.session_state.portfolio_data.drop(target_id).reset_index(drop=True)
             save_data(st.session_state.portfolio_data)
-            st.success("持仓已成功删除！数据已同步到本地保存。")
+            st.success("持仓已删除，本地存档已同步更新！")
             st.rerun()
+
+# ================= 模块三：📈 策略主页简介 =================
+elif menu == "📈 策略主页简介":
+    st.title("📈 Sell Put (Short Put) 期权策略看板")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric(label="📊 跟踪的持仓标的", value=f"{len(st.session_state.portfolio_data)} 个")
+    with col2:
+        total_credit = st.session_state.portfolio_data["收入权利金(Credit)"].sum() if not st.session_state.portfolio_data.empty else 0
+        st.metric(label="💰 已落袋/锁定权利金总额", value=f"${total_credit:.2f}")
+
+    st.markdown("---")
+    st.subheader("💡 策略通俗释义")
+    st.write("卖出看跌期权（Sell Put）核心逻辑是：**『承诺在未来某个低价向别人买入股票，并当场收取一笔保管费（权利金）。』**")
+    st.markdown(
+        """
+        * **完美结局（股价横盘或上涨）**：期权归零，保管费纯赚，无需买入股票。
+        * **抄底结局（股价小幅跌破行权价）**：被迫以你心仪的低价买入股票，且扣除保管费后，实际接盘成本更低。
+        * **爆雷危机（股价雪崩）**：股价跌幅远超想象，必须高价接盘，会产生账面浮亏。
+        """
+    )
