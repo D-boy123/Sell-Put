@@ -1,218 +1,133 @@
-import datetime as dt
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import yfinance as yf
+import numpy as np
+from scipy.stats import norm
 
-# 设置网页标题和布局
-st.set_page_config(page_title='Short Put 波动率扫描器', layout='wide')
-st.title('📊 Short Put 选股扫描器 (Z-Score 优化多期版)')
+st.set_page_config(layout="wide")
 
-# --- 侧边栏参数设置 ---
-st.sidebar.header('⚙️ 扫描参数设置')
-min_yield = st.sidebar.number_input(
-    '最低年化收益率 (%)', min_value=0.0, max_value=100.0, value=20.0, step=1.0
-)
-min_gap = st.sidebar.number_input(
-    '最小价差保护 (%)', min_value=0.0, max_value=10.0, value=2.0, step=0.5
-)
+# ================= 侧边栏菜单切换 =================
+menu = st.sidebar.selectbox("功能菜单", ["主页分析", "当前持仓"])
 
-# 默认监控池
-default_watchlist = (
-    'ABBV, AAPL, MSFT, INTC, QCOM, TQQQ, SPCX, PDD, TSLA, JD'
-)
-watchlist_input = st.sidebar.text_area('股票监控池 (逗号分隔)', default_watchlist)
-watchlist = [t.strip().upper() for t in watchlist_input.split(',') if t.strip()]
-
-
-# --- 核心扫描逻辑 ---
-def scan_short_puts(tickers, min_annual_yield, min_gap_pct):
-  today = dt.date.today()
-  all_results = []
-
-  for ticker_symbol in tickers:
+# ================= 理论计算：行权概率 (基于 Black-Scholes Delta) =================
+def estimate_itm_probability(ticker_symbol, strike, is_put=True):
+    """
+    通过 yfinance 获取最接近的期权链，利用 Delta 或隐含波动率估算 Sell Put 的行权概率
+    """
     try:
-      stock = yf.Ticker(ticker_symbol)
+        ticker = yf.Ticker(ticker_symbol)
+        # 获取现价
+        current_price = ticker.fast_info['last_price']
+        
+        # 获取期权到期日
+        expirations = ticker.options
+        if not expirations:
+            return 0.5 # 无期权数据时返回默认值
+        
+        # 默认取最近的一个到期日进行估算（实际应用中可根据持仓调整）
+        opt = ticker.option_chain(expirations[0])
+        calls_or_puts = opt.puts if is_put else opt.calls
+        
+        # 寻找最接近 Strike 的期权数据以获取隐含波动率(IV)
+        closest_opt = calls_or_puts.iloc[(calls_or_puts['strike'] - strike).abs().argsort()[:1]]
+        if closest_opt.empty:
+            return 0.5
+            
+        iv = closest_opt['impliedVolatility'].values[0]
+        
+        # 简单的 Black-Scholes T=30天(0.08年) 估算散点 Delta 作为行权概率近似
+        T = 30 / 365.0 
+        r = 0.04 # 假设无风险利率 4%
+        if iv == 0: iv = 0.30 # 缺省波动率
+        
+        d1 = (np.log(current_price / strike) + (r + 0.5 * iv ** 2) * T) / (iv * np.sqrt(T))
+        d2 = d1 - iv * np.sqrt(T)
+        
+        # 对于 Sell Put，ITM(被行权) 的概率是 P(S < K) = N(-d2)
+        itm_prob = norm.cdf(-d2) if is_put else norm.cdf(d2)
+        return itm_prob
+    except:
+        return None
 
-      # 1. 获取当前股价
-      todays_data = stock.history(period='1d')
-      if todays_data.empty:
-        continue
-      current_price = todays_data['Close'].iloc[-1]
+# ================= 场景一：主页分析 =================
+if menu == "主页分析":
+    st.title("📈 欢迎使用 Sell Put 策略分析系统")
+    st.write("请在左侧菜单切换到 **当前持仓** 来管理您的仓位。")
 
-      # 2. 获取期权到期日
-      exp_dates = stock.options
-      if not exp_dates:
-        continue
+# ================= 场景二：当前持仓 =================
+elif menu == "当前持仓":
+    st.title("💼 当前持仓管理")
+    st.write("您可以在下表中**直接双击修改**、**在最下方空白行新增**持仓，或选中行按 Delete 删除。")
 
-      # 提取前两个到期日
-      target_exps = exp_dates[:2]
+    # 初始化本地临时缓存数据（实际生产中可结合数据库或st.session_state）
+    if 'portfolio_data' not in st.session_state:
+        st.session_state.portfolio_data = pd.DataFrame([
+            {"股票代码": "AAPL", "下单行权价(Strike)": 220.0, "收入权利金(Credit)": 1.50},
+            {"股票代码": "TSLA", "下单行权价(Strike)": 240.0, "收入权利金(Credit)": 3.80}
+        ])
 
-      for index, target_exp in enumerate(target_exps):
-        exp_date_obj = dt.datetime.strptime(target_exp, '%Y-%m-%d').date()
-        days = (exp_date_obj - today).days
-        if days <= 0:
-          days = 1
-        time_to_expiry_years = days / 365.0
+    # 使用 Streamlit 强大的可编辑表格展现，允许用户自由增删改
+    edited_df = st.data_editor(
+        st.session_state.portfolio_data,
+        num_rows="dynamic", # 允许动态增加行
+        use_container_width=True,
+        key="portfolio_editor"
+    )
+    
+    # 保存用户的修改
+    st.session_state.portfolio_data = edited_df
 
-        # 3. 获取 Put 期权链
-        opt = stock.option_chain(target_exp)
-        puts = opt.puts
-        if 'strike' not in puts.columns or 'bid' not in puts.columns:
-          continue
-
-        # 4. 筛选
-        otm_puts = puts[
-            (puts['strike'] < current_price) & (puts['bid'] > 0)
-        ].copy()
-
-        for _, row in otm_puts.iterrows():
-          strike = row['strike']
-          bid = row['bid']
-          iv = row.get('impliedVolatility', 0)
-
-          if pd.isna(iv) or iv <= 0:
-            iv = 0.25
-
-          # 计算指标
-          single_yield = bid / strike
-          annual_yield = single_yield * (365 / days) * 100
-          price_diff = current_price - strike
-          z_score = price_diff / (
-              current_price * iv * np.sqrt(time_to_expiry_years)
-          )
-          price_gap_pct = price_diff / current_price
-
-          # 红线判定
-          if (
-              annual_yield >= min_annual_yield
-              and price_gap_pct >= (min_gap_pct / 100.0)
-          ):
-            final_score = annual_yield * z_score
-          else:
-            final_score = 0.0
-
-          all_results.append({
-              'Ticker': ticker_symbol,
-              'Current_Price': round(current_price, 2),
-              'Expiration': target_exp,
-              'Period_Index': index,  # 0代表近期，1代表下期
-              'Days': days,
-              'Strike': strike,
-              'Bid': bid,
-              'IV_%': round(iv * 100, 1),
-              'Annual_Yield_%': round(annual_yield, 2),
-              'Z_Score': round(z_score, 2),
-              'Final_Score': round(final_score, 2),
-          })
-    except Exception:
-      pass
-
-  return pd.DataFrame(all_results) if all_results else pd.DataFrame()
-
-
-# --- 高亮染色函数 ---
-def style_row(row, best_near_idx, best_next_idx):
-  """根据索引为整行施加不同的背景颜色"""
-  if row.name == best_near_idx:
-    # 近期最佳：浅绿色背景，深绿色文字
-    return [
-        'background-color: #d4edda; color: #155724; font-weight: bold'
-    ] * len(row)
-  elif row.name == best_next_idx:
-    # 下期最佳：浅蓝色背景，深蓝色文字
-    return [
-        'background-color: #cce5ff; color: #004085; font-weight: bold'
-    ] * len(row)
-  return [''] * len(row)
-
-
-# --- 页面主触发按钮 ---
-if st.sidebar.button('🚀 开始扫描市场', type='primary'):
-  with st.spinner('正在实时获取期权链数据，请稍候...'):
-    results_df = scan_short_puts(watchlist, min_yield, min_gap)
-
-  if not results_df.empty:
-    st.subheader('📈 扫描结果展示')
-    st.caption('💡 说明：绿色整行代表【近期最佳】，蓝色整行代表【下期最佳】。')
-
-    for ticker in watchlist:
-      ticker_df = results_df[
-          (results_df['Ticker'] == ticker) & (results_df['Final_Score'] > 0)
-      ]
-
-      st.markdown(f'### 🔍 {ticker}')
-
-      if not ticker_df.empty:
-        unique_exps = sorted(ticker_df['Expiration'].unique())
-        final_picks = []
-
-        # 1. 提取每期前3名
-        for exp in unique_exps:
-          exp_df = ticker_df[ticker_df['Expiration'] == exp]
-          top_picks_exp = exp_df.sort_values(
-              by='Final_Score', ascending=False
-          ).head(3)
-          if not top_picks_exp.empty:
-            final_picks.append(top_picks_exp)
-
-        # 合并并重置索引，以便准确定位行号
-        combined_df = (
-            pd.concat(final_picks)
-            .sort_values(
-                by=['Expiration', 'Final_Score'], ascending=[True, False]
-            )
-            .reset_index(drop=True)
-        )
-
-        # 2. 找到近期和下期的最高分全局行索引
-        best_near_idx = -1
-        best_next_idx = -1
-
-        near_part = combined_df[combined_df['Period_Index'] == 0]
-        if not near_part.empty:
-          best_near_idx = near_part['Final_Score'].idxmax()
-
-        next_part = combined_df[combined_df['Period_Index'] == 1]
-        if not next_part.empty:
-          best_next_idx = next_part['Final_Score'].idxmax()
-
-        # 3. 清洗并格式化输出表格
-        print_df = combined_df[[
-            'Expiration',
-            'Days',
-            'Strike',
-            'Current_Price',
-            'IV_%',
-            'Bid',
-            'Annual_Yield_%',
-            'Z_Score',
-            'Final_Score',
-        ]]
-
-        # 4. 调用 Pandas Styler 渲染颜色，并完美对齐
-        styled_table = print_df.style.apply(
-            style_row,
-            axis=1,
-            best_near_idx=best_near_idx,
-            best_next_idx=best_next_idx,
-        ).format({
-            'Current_Price': '{:.2f}',
-            'Strike': '{:.2f}',
-            'Bid': '{:.2f}',
-            'Annual_Yield_%': '{:.2f}',
-            'IV_%': '{:.1f}',
-            'Z_Score': '{:.2f}',
-            'Final_Score': '{:.2f}',
-        })
-
-        # 5. 在网页上渲染成响应式表格
-        st.dataframe(styled_table, use_container_width=True)
-      else:
-        st.info('未找到满足条件（年化收益或保护价差）的合格合约。')
-
-      st.markdown('---')
-  else:
-    st.error('监控池内所有股票均未扫描到有效数据，请检查网络或稍后再试。')
-else:
-  st.info('👈 请在左侧调整参数，然后点击 **“开始扫描市场”** 按钮。')
+    # 当用户点击计算按钮时，自动抓取实时行情并计算衍生指标
+    if st.button("🔄 刷新并计算最新状态"):
+        with st.spinner("正在获取雅虎财经实时数据及计算行权概率..."):
+            results = []
+            
+            for index, row in edited_df.iterrows():
+                ticker_str = str(row["股票代码"]).upper().strip()
+                strike = float(row["下单行权价(Strike)"])
+                credit = float(row["收入权利金(Credit)"])
+                
+                if not ticker_str:
+                    continue
+                    
+                try:
+                    # 1. 抓取当前价格
+                    t = yf.Ticker(ticker_str)
+                    current_price = t.fast_info['last_price']
+                    
+                    # 2. 计算与行权价的差异 (%) 
+                    # 对于 Sell Put，现价高于行权价安全。差异 = (现价 - 行权价) / 现价
+                    price_diff_pct = ((current_price - strike) / current_price) * 100
+                    
+                    # 3. 估算行权概率
+                    prob = estimate_itm_probability(ticker_str, strike, is_put=True)
+                    prob_str = f"{prob*100:.1f}%" if prob is not None else "无法估算"
+                    
+                    results.append({
+                        "股票代码": ticker_str,
+                        "行权价 (Strike)": f"${strike:.2f}",
+                        "权利金 (Credit)": f"${credit:.2f}",
+                        "当前估价 (Current)": f"${current_price:.2f}",
+                        "距行权安全垫 (%)": f"{price_diff_pct:.2f}%",
+                        "预计被行权概率": prob_str
+                    })
+                except Exception as e:
+                    results.append({
+                        "股票代码": ticker_str,
+                        "行权价 (Strike)": f"${strike:.2f}",
+                        "权利金 (Credit)": f"${credit:.2f}",
+                        "当前估价 (Current)": "获取失败",
+                        "距行权安全垫 (%)": "N/A",
+                        "预计被行权概率": "N/A"
+                    })
+            
+            # 渲染最终的计算结果报表
+            if results:
+                st.subheader("📊 实时持仓透视表")
+                res_df = pd.DataFrame(results)
+                st.dataframe(res_df, use_container_width=True)
+                
+                # 额外的小贴士
+                st.info("💡 **指标说明**：\n"
+                        "- **距行权安全垫 (%)**：正数代表当前股价高于行权价（安全）；负数代表股价已跌破行权价（将被行权）。\n"
+                        "- **预计被行权概率**：基于隐含波动率(IV)与标准期权定价模型(Delta)估算的 30 天内变成实值(ITM)的概率。")
