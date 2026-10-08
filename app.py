@@ -45,13 +45,13 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
         if not expirations:
             return 0.5
         
-        opt = ticker.option_chain(expirations[0]) # 取最近一个到期日进行估算
+        opt = ticker.option_chain(expirations) # 取最近一个到期日进行估算
         calls_or_puts = opt.puts if is_put else opt.calls
         closest_opt = calls_or_puts.iloc[(calls_or_puts['strike'] - strike).abs().argsort()[:1]]
         if closest_opt.empty:
             return 0.5
             
-        iv = closest_opt['impliedVolatility'].values[0]
+        iv = closest_opt['impliedVolatility'].values
         T = 30 / 365.0 
         r = 0.04 
         if iv == 0 or np.isnan(iv): iv = 0.30 
@@ -63,82 +63,11 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
     except:
         return None
 
-# ================= 3. 侧边栏功能切换菜单 =================
-menu = st.sidebar.selectbox("功能菜单", ["🔍 筛选合适股票", "💼 当前持仓管理", "📈 策略主页简介"])
+# ================= 3. 侧边栏功能切换菜单（已将当前持仓设为第一项/主页） =================
+menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
 
-# ================= 模块一：🔍 筛选合适股票（完全恢复并保留） =================
-if menu == "🔍 筛选合适股票":
-    st.title("🔍 Sell Put 潜在股票筛选神器")
-    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标，辅助评估其是否适合作为 Sell Put 标的。")
-    
-    # 股票池输入与核心参数设定
-    col_input, col_param = st.columns([2, 1])
-    with col_input:
-        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA, AMD）", "AAPL, TSLA, NVDA")
-    with col_param:
-        min_price = st.number_input("最低股价过滤 ($)", min_value=0.0, value=50.0)
-
-    # 触发筛选按钮
-    if st.button("🚀 开始抓取并筛选数据", type="primary"):
-        tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-        
-        if not tickers:
-            st.error("请输入至少一个股票代码！")
-        else:
-            screen_results = []
-            with st.spinner("正在连线雅虎财经，全面扫描正股指标中..."):
-                for t_sym in tickers:
-                    try:
-                        t_obj = yf.Ticker(t_sym)
-                        info = t_obj.info
-                        fast = t_obj.fast_info
-                        
-                        price = fast['last_price']
-                        
-                        # 过滤低于设定阈值的股票
-                        if price < min_price:
-                            continue
-                            
-                        # 安全提取雅虎财经财务/技术面指标
-                        pe = info.get('trailingPE', np.nan)
-                        pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
-                        
-                        fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
-                        dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
-                        dist_str = f"+{dist_from_low:.1f}%" if pd.notnull(dist_from_low) else "N/A"
-                        
-                        beta = info.get('beta', np.nan)
-                        beta_str = f"{beta:.2f}" if pd.notnull(beta) else "N/A"
-                        
-                        # 简单评估建议（Sell Put 偏好：市盈率健康、波动稳定、距离52周低点有一定安全垫）
-                        if pd.notnull(beta) and beta > 1.5:
-                            advice = "⚠️ 波动剧烈 (高Beta)，权利金高但接盘风险大"
-                        elif pd.notnull(pe) and pe > 50:
-                            advice = "⚠️ 估值偏高 (高PE)，注意高位回撤风险"
-                        else:
-                            advice = "✅ 适合 Sell Put (估值或波动较稳健)"
-
-                        screen_results.append({
-                            "股票代码": t_sym,
-                            "当前股价": f"${price:.2f}",
-                            "市盈率 (PE)": pe_str,
-                            "52周最低价距离": dist_str,
-                            "波动率系数 (Beta)": beta_str,
-                            "策略初评建议": advice
-                        })
-                    except:
-                        screen_results.append({
-                            "股票代码": t_sym, "当前股价": "抓取失败", "市盈率 (PE)": "N/A", "52周最低价距离": "N/A", "波动率系数 (Beta)": "N/A", "策略初评建议": "❌ 无法获取该股票信息"
-                        })
-                        
-            if screen_results:
-                st.subheader("📊 扫描筛选结果透视表")
-                st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
-            else:
-                st.info("没有满足您所设定『最低股价过滤』条件的股票。")
-
-# ================= 模块二：💼 当前持仓管理（今日最新弹窗+永久保存版） =================
-elif menu == "💼 当前持仓管理":
+# ================= 模块一：💼 当前持仓管理（已设为默认主页） =================
+if menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
     st.write("您可以在这里查看实时仓位表现、计算安全垫和行权率，并使用底部的弹窗添加或一键删除单子。")
     
@@ -219,24 +148,73 @@ elif menu == "💼 当前持仓管理":
             st.success("持仓已删除，本地存档已同步更新！")
             st.rerun()
 
-# ================= 模块三：📈 策略主页简介 =================
-elif menu == "📈 策略主页简介":
-    st.title("📈 Sell Put (Short Put) 期权策略看板")
+# ================= 模块二：🔍 筛选合适股票 =================
+elif menu == "🔍 筛选合适股票":
+    st.title("🔍 Sell Put 潜在股票筛选神器")
+    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标，辅助评估其是否适合作为 Sell Put 标的。")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric(label="📊 跟踪的持仓标的", value=f"{len(st.session_state.portfolio_data)} 个")
-    with col2:
-        total_credit = st.session_state.portfolio_data["收入权利金(Credit)"].sum() if not st.session_state.portfolio_data.empty else 0
-        st.metric(label="💰 已落袋/锁定权利金总额", value=f"${total_credit:.2f}")
+    # 股票池输入与核心参数设定
+    col_input, col_param = st.columns()
+    with col_input:
+        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA, AMD）", "AAPL, TSLA, NVDA")
+    with col_param:
+        min_price = st.number_input("最低股价过滤 ($)", min_value=0.0, value=50.0)
 
-    st.markdown("---")
-    st.subheader("💡 策略通俗释义")
-    st.write("卖出看跌期权（Sell Put）核心逻辑是：**『承诺在未来某个低价向别人买入股票，并当场收取一笔保管费（权利金）。』**")
-    st.markdown(
-        """
-        * **完美结局（股价横盘或上涨）**：期权归零，保管费纯赚，无需买入股票。
-        * **抄底结局（股价小幅跌破行权价）**：被迫以你心仪的低价买入股票，且扣除保管费后，实际接盘成本更低。
-        * **爆雷危机（股价雪崩）**：股价跌幅远超想象，必须高价接盘，会产生账面浮亏。
-        """
-    )
+    # 触发筛选按钮
+    if st.button("🚀 开始抓取并筛选数据", type="primary"):
+        tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+        
+        if not tickers:
+            st.error("请输入至少一个股票代码！")
+        else:
+            screen_results = []
+            with st.spinner("正在连线雅虎财经，全面扫描正股指标中..."):
+                for t_sym in tickers:
+                    try:
+                        t_obj = yf.Ticker(t_sym)
+                        info = t_obj.info
+                        fast = t_obj.fast_info
+                        
+                        price = fast['last_price']
+                        
+                        # 过滤低于设定阈值的股票
+                        if price < min_price:
+                            continue
+                            
+                        # 安全提取雅虎财经财务/技术面指标
+                        pe = info.get('trailingPE', np.nan)
+                        pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
+                        
+                        fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
+                        dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
+                        dist_str = f"+{dist_from_low:.1f}%" if pd.notnull(dist_from_low) else "N/A"
+                        
+                        beta = info.get('beta', np.nan)
+                        beta_str = f"{beta:.2f}" if pd.notnull(beta) else "N/A"
+                        
+                        # 简单评估建议
+                        if pd.notnull(beta) and beta > 1.5:
+                            advice = "⚠️ 波动剧烈 (高Beta)，权利金高但接盘风险大"
+                        elif pd.notnull(pe) and pe > 50:
+                            advice = "⚠️ 估值偏高 (高PE)，注意高位回撤风险"
+                        else:
+                            advice = "✅ 适合 Sell Put (估值或波动较稳健)"
+
+                        screen_results.append({
+                            "股票代码": t_sym,
+                            "当前股价": f"${price:.2f}",
+                            "市盈率 (PE)": pe_str,
+                            "52周最低价距离": dist_str,
+                            "波动率系数 (Beta)": beta_str,
+                            "策略初评建议": advice
+                        })
+                    except:
+                        screen_results.append({
+                            "股票代码": t_sym, "当前股价": "抓取失败", "市盈率 (PE)": "N/A", "52周最低价距离": "N/A", "波动率系数 (Beta)": "N/A", "策略初评建议": "❌ 无法获取该股票信息"
+                        })
+                        
+            if screen_results:
+                st.subheader("📊 扫描筛选结果透视表")
+                st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
+            else:
+                st.info("没有满足您所设定『最低股价过滤』条件的股票。")
