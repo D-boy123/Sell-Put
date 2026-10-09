@@ -194,7 +194,7 @@ if menu == "💼 当前持仓管理":
             
         st.markdown("")
 
-        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率']
+        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', 'current正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率']
         display_df = res_df[cols]
         
         st.subheader("📊 实时持仓监控盘面")
@@ -202,7 +202,7 @@ if menu == "💼 当前持仓管理":
         edited_df = st.data_editor(
             display_df,
             use_container_width=True,
-            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率'],
+            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', 'current正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率'],
             key="portfolio_editor_v5"
         )
         
@@ -221,7 +221,7 @@ if menu == "💼 当前持仓管理":
             else:
                 st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
 
-# ================= 模块二：🔍 筛选合适股票（已全线修复缩进问题） =================
+# ================= 模块二：🔍 筛选合适股票（已彻底修复全部缩进） =================
 elif menu == "🔍 筛选合适股票":
     st.title("🔍 Sell Put 潜在股票筛选神器")
     st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
@@ -250,4 +250,3 @@ elif menu == "🔍 筛选合适股票":
                         if price < min_price:
                             continue
                             
-                        pe = info.get('trailingPE', np.nan)
