@@ -39,7 +39,6 @@ def load_data():
             if df.empty:
                 return pd.DataFrame(columns=DEFAULT_COLUMNS)
 
-            # 兼容升级旧数据机制
             if "持仓数量(张)" not in df.columns:
                 df["持仓数量(张)"] = 1
             if "到期日" not in df.columns:
@@ -97,6 +96,16 @@ def fetch_option_chain(ticker: str, expiry: str):
         return t.option_chain(expiry).puts
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_expirations(ticker: str):
+    """获取标的全部到期日列表"""
+    try:
+        t = yf.Ticker(ticker)
+        return list(t.options) if t.options else []
+    except Exception:
+        return []
 
 
 def get_option_quote(ticker: str, expiry: str, strike: float):
@@ -158,7 +167,7 @@ def bs_put(S, K, T, r, sigma):
 # ================= 4. 持仓分析核心 =================
 def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
     """对每个持仓计算：现价、期权现价、浮盈、年化、行权概率等"""
-    today = us_today()          # 美东时区
+    today = us_today()
     r = RISK_FREE_RATE
     out = []
 
@@ -186,7 +195,6 @@ def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
 
         T = max(dte, 0) / 365.0 if not np.isnan(dte) else np.nan
 
-        # 期权现价：优先市场报价，否则用 BS 理论价
         quote = None
         if exp_date is not None and dte >= 0:
             quote = get_option_quote(ticker, exp_str, K)
@@ -197,7 +205,6 @@ def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
         mkt_price = quote["mid"] if quote else np.nan
         opt_price = mkt_price if pd.notna(mkt_price) else theo
 
-        # 盈亏
         if status == "已平仓":
             close_px = pos.get("平仓价", np.nan)
             try:
@@ -215,7 +222,6 @@ def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 ann = np.nan
 
-        # 开仓时静态年化
         try:
             open_date = datetime.strptime(str(pos["开仓日期"])[:10], "%Y-%m-%d").date()
             dte_open = (exp_date - open_date).days if exp_date else np.nan
@@ -240,10 +246,8 @@ def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
             "开仓年化": static_ann,
             "行权概率": prob_itm,
             "距行权价%": ((S - K) / S) if pd.notna(S) and S else np.nan,
-            # 以下保留用于内部风险聚合，不直接展示在总览表
             "Delta": delta,
             "Theta($/日)": (theta if pd.notna(theta) else 0) * 100 * qty,
-            "Delta敞口($)": (delta * 100 * qty * S) if pd.notna(delta) and pd.notna(S) else np.nan,
         })
 
     return pd.DataFrame(out)
@@ -257,13 +261,104 @@ def fmt_money(x):
     return f"${x:,.2f}" if pd.notna(x) else "—"
 
 
-# ================= 5. 主界面 =================
+# ================= 5. 选股分析工具函数 =================
+def pick_expiration(ticker: str, target_dte: int):
+    """按目标天数选择最接近的可用到期日"""
+    exps = get_expirations(ticker)
+    if not exps:
+        return None
+    today = us_today()
+    best, best_diff = None, float("inf")
+    for e in exps:
+        try:
+            d = datetime.strptime(e, "%Y-%m-%d").date()
+            dte = (d - today).days
+            if dte < 1:
+                continue
+            diff = abs(dte - target_dte)
+            if diff < best_diff:
+                best_diff, best = diff, e
+        except Exception:
+            continue
+    return best
+
+
+def scan_ticker(ticker: str, expiry: str, otm_pct: float):
+    """对单个标的做 Sell Put 扫描：找出最接近目标 OTM 的 Put 并计算指标"""
+    mkt = fetch_market(ticker)
+    if not mkt:
+        return None
+    S = mkt["price"]
+    hv = mkt["hv"]
+
+    puts = fetch_option_chain(ticker, expiry)
+    if puts is None or puts.empty:
+        return None
+
+    # 只在 OTM（行权价 <= 现价）范围内选择
+    puts = puts[puts["strike"] <= S * 0.999].copy()
+    if puts.empty:
+        return None
+
+    target_K = S * (1 - otm_pct)
+    idx = (puts["strike"] - target_K).abs().idxmin()
+    row = puts.loc[idx]
+
+    K = float(row["strike"])
+    bid = row.get("bid", np.nan)
+    ask = row.get("ask", np.nan)
+    last = row.get("lastPrice", np.nan)
+    if pd.notna(bid) and pd.notna(ask) and bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+    else:
+        mid = last if pd.notna(last) and last > 0 else np.nan
+
+    iv = row.get("impliedVolatility", np.nan)
+    if pd.isna(iv) or iv <= 0:
+        iv = hv
+
+    try:
+        exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        dte = (exp_date - us_today()).days
+    except Exception:
+        return None
+
+    T = max(dte, 0) / 365.0
+    theo, delta, gamma, theta, vega, prob_itm = bs_put(S, K, T, RISK_FREE_RATE, iv)
+
+    prem = mid if pd.notna(mid) else theo
+    ann = (prem / K * 365.0 / dte) if dte > 0 and pd.notna(prem) else np.nan
+
+    return {
+        "代码": ticker,
+        "现价": S,
+        "HV30": hv,
+        "IV": iv,
+        "IV/HV": (iv / hv) if pd.notna(hv) and hv > 0 else np.nan,
+        "到期日": expiry,
+        "剩余天数": dte,
+        "建议行权价": K,
+        "OTM%": (S - K) / S if S else np.nan,
+        "Delta": delta,
+        "权利金": prem,
+        "权利金/张($)": prem * 100 if pd.notna(prem) else np.nan,
+        "占用资金/张($)": K * 100,
+        "年化收益率": ann,
+        "行权概率": prob_itm,
+        "OI": row.get("openInterest", np.nan),
+        "成交量": row.get("volume", np.nan),
+    }
+
+
+# ================= 6. 主界面 =================
 st.title("📈 Sell Put 策略管理系统")
 
 if "df" not in st.session_state:
     st.session_state.df = load_data()
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = None
 
-# ---------- 侧边栏（已简化） ----------
+# ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("⚙️ 操作")
     if st.button("🔄 刷新行情缓存", use_container_width=True):
@@ -277,8 +372,8 @@ with st.sidebar:
 
 df = st.session_state.df
 
-tab_overview, tab_manage, tab_risk, tab_data = st.tabs(
-    ["📊 持仓总览", "✏️ 持仓管理", "⚠️ 风险分析", "💾 数据管理"]
+tab_overview, tab_manage, tab_screen = st.tabs(
+    ["📊 持仓总览", "✏️ 持仓管理", "🔍 选股分析"]
 )
 
 # ---------- 计算分析结果 ----------
@@ -296,7 +391,6 @@ with tab_overview:
         total_premium = open_pos["权利金"].mul(100).mul(open_pos["张数"]).sum() if not open_pos.empty else 0
         total_pnl = open_pos["浮动盈亏($)"].sum() if not open_pos.empty else 0
         total_cash = open_pos["占用资金($)"].sum() if not open_pos.empty else 0
-        total_theta = open_pos["Theta($/日)"].sum() if not open_pos.empty else 0
 
         c1.metric("持仓中合约", f"{len(open_pos)} 笔")
         c2.metric("已收权利金", fmt_money(total_premium))
@@ -306,7 +400,6 @@ with tab_overview:
 
         st.divider()
 
-        # 只保留你需要的列
         DISPLAY_COLS = [
             "代码", "状态", "行权价", "到期日", "剩余天数", "张数",
             "权利金", "现价", "期权现价", "IV",
@@ -332,7 +425,6 @@ with tab_overview:
             use_container_width=True, height=420,
         )
 
-        # ---- 单笔到期损益图 ----
         st.subheader("📉 到期损益模拟")
         if not open_pos.empty:
             labels = open_pos.apply(
@@ -435,120 +527,108 @@ with tab_manage:
         if b2.button("↩️ 放弃修改", use_container_width=False):
             st.rerun()
 
-# ================= Tab 3: 风险分析 =================
-with tab_risk:
-    if open_pos.empty:
-        st.info("暂无持仓中的合约。")
-    else:
-        st.subheader("组合风险指标")
-        total_cash = open_pos["占用资金($)"].sum()
-        total_delta = open_pos["Delta敞口($)"].sum()
-        weighted_prob = (
-            (open_pos["行权概率"].fillna(0) * open_pos["占用资金($)"]).sum() / total_cash
-            if total_cash else np.nan
-        )
-        near = open_pos[open_pos["距行权价%"] < 0.05]
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("总占用资金", fmt_money(total_cash))
-        k2.metric("组合 Delta 敞口", fmt_money(total_delta))
-        k3.metric("加权行权概率", fmt_pct(weighted_prob))
-        k4.metric("接近行权(<5%)", f"{len(near)} 笔")
-
-        st.divider()
-        st.subheader("🚨 风险预警")
-        warnings = []
-        for _, row in open_pos.iterrows():
-            tag = f"**{row['代码']} {row['行权价']:.1f}P {row['到期日']}**"
-            if pd.notna(row["距行权价%"]) and row["距行权价%"] < 0.03:
-                warnings.append(f"🔴 {tag}：现价距行权价仅 {row['距行权价%']*100:.2f}%，深度实值风险")
-            elif pd.notna(row["距行权价%"]) and row["距行权价%"] < 0.08:
-                warnings.append(f"🟠 {tag}：现价距行权价 {row['距行权价%']*100:.2f}%，需密切关注")
-            if pd.notna(row["剩余天数"]) and 0 <= row["剩余天数"] <= 7:
-                warnings.append(f"⏰ {tag}：仅剩 {int(row['剩余天数'])} 天到期，考虑平仓或滚动")
-            if pd.notna(row["剩余天数"]) and row["剩余天数"] < 0:
-                warnings.append(f"⚫ {tag}：已过期 {abs(int(row['剩余天数']))} 天，请更新状态")
-
-        if warnings:
-            for w in warnings:
-                st.warning(w, icon="⚠️")
-        else:
-            st.success("当前所有持仓风险指标正常 ✅")
-
-        st.divider()
-        st.subheader("按标的聚合")
-        agg = open_pos.groupby("代码").agg(
-            张数=("张数", "sum"),
-            占用资金=("占用资金($)", "sum"),
-            浮动盈亏=("浮动盈亏($)", "sum"),
-            总Theta=("Theta($/日)", "sum"),
-        ).reset_index()
-        st.dataframe(
-            agg.style.format({
-                "占用资金": "${:,.0f}", "浮动盈亏": "${:,.0f}",
-                "总Theta": "${:,.1f}",
-            }),
-            use_container_width=True,
-        )
-
-# ================= Tab 4: 数据管理 =================
-with tab_data:
-    st.subheader("💾 数据导入 / 导出")
-    d1, d2, d3 = st.columns(3)
-
-    with d1:
-        st.download_button(
-            "⬇️ 导出 JSON",
-            data=json.dumps(json.loads(df.to_json(orient="records", force_ascii=False)),
-                            ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name=f"portfolio_{us_today():%Y%m%d}.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-
-    with d2:
-        st.download_button(
-            "⬇️ 导出 CSV",
-            data=df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"portfolio_{us_today():%Y%m%d}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-    with d3:
-        if st.button("🗑️ 清空所有数据", use_container_width=True):
-            st.session_state.df = pd.DataFrame(columns=DEFAULT_COLUMNS)
-            save_data(st.session_state.df)
-            st.warning("已清空全部持仓")
-            st.rerun()
-
-    st.divider()
-    st.subheader("📤 导入持仓文件")
-    uploaded = st.file_uploader("选择 JSON 或 CSV 文件", type=["json", "csv"])
-    if uploaded is not None:
-        try:
-            if uploaded.name.endswith(".json"):
-                incoming = pd.DataFrame(json.load(uploaded))
-            else:
-                incoming = pd.read_csv(uploaded)
-            for col in DEFAULT_COLUMNS:
-                if col not in incoming.columns:
-                    incoming[col] = np.nan
-            mode = st.radio("导入方式", ["覆盖现有数据", "追加到现有数据"], horizontal=True)
-            if st.button("确认导入", type="primary"):
-                if mode == "覆盖现有数据":
-                    st.session_state.df = incoming[DEFAULT_COLUMNS].reset_index(drop=True)
-                else:
-                    st.session_state.df = pd.concat(
-                        [st.session_state.df, incoming[DEFAULT_COLUMNS]], ignore_index=True)
-                save_data(st.session_state.df)
-                st.success(f"成功导入 {len(incoming)} 条记录")
-                st.rerun()
-        except Exception as e:
-            st.error(f"文件解析失败：{e}")
-
-    st.divider()
+# ================= Tab 3: 选股分析 =================
+with tab_screen:
+    st.subheader("🔍 Sell Put 选股扫描")
     st.caption(
-        "💡 提示：所有数据保存在本地 `portfolio.json` 文件中，不会上传到任何服务器。"
-        "行情与期权数据来自 Yahoo Finance，可能存在 15 分钟延迟。"
+        "输入标的清单，系统自动选择最接近目标到期天数的期权，"
+        "并找出最接近目标 OTM 幅度的 Put，计算年化收益率与风险指标。"
     )
+
+    with st.expander("📝 扫描参数", expanded=True):
+        col_a, col_b = st.columns([3, 2])
+        with col_a:
+            tickers_input = st.text_area(
+                "标的列表（逗号或换行分隔）",
+                value="AAPL, MSFT, NVDA, TSLA, AMZN, META, GOOGL, SPY, QQQ",
+                height=110,
+            )
+        with col_b:
+            target_dte = st.slider("目标到期天数 (DTE)", 7, 180, 30, 7)
+            otm_pct_input = st.slider("目标 OTM 幅度 (%)", 1, 40, 7, 1) / 100.0
+
+        run_scan = st.button("🚀 开始扫描", type="primary", use_container_width=True)
+
+    if run_scan:
+        tickers = [t.strip().upper() for t in tickers_input.replace("\n", ",").split(",") if t.strip()]
+        if not tickers:
+            st.error("请输入至少一个标的代码")
+        else:
+            results = []
+            progress = st.progress(0.0, text="扫描中…")
+            for i, tk in enumerate(tickers):
+                exp = pick_expiration(tk, target_dte)
+                if exp is None:
+                    progress.progress((i + 1) / len(tickers), text=f"扫描 {tk}（无可用期权）")
+                    continue
+                r = scan_ticker(tk, exp, otm_pct_input)
+                if r:
+                    results.append(r)
+                progress.progress((i + 1) / len(tickers), text=f"扫描 {tk} 完成")
+            progress.empty()
+
+            if results:
+                res_df = pd.DataFrame(results).sort_values(
+                    "年化收益率", ascending=False).reset_index(drop=True)
+                st.session_state.scan_results = res_df
+            else:
+                st.session_state.scan_results = None
+                st.warning("未获取到任何数据，请检查标的代码或稍后重试。")
+
+    if st.session_state.scan_results is not None:
+        res = st.session_state.scan_results.copy()
+
+        st.divider()
+        f1, f2, f3 = st.columns(3)
+        min_ann = f1.slider("最低年化收益率 (%)", 0, 100, 15, 1) / 100.0
+        min_ivhv = f2.slider("最低 IV/HV 比率", 0.0, 3.0, 0.0, 0.1)
+        max_delta = f3.slider("最大 |Delta|", 0.05, 0.60, 0.40, 0.01)
+
+        filt = res[
+            (res["年化收益率"].fillna(-1) >= min_ann)
+            & (res["IV/HV"].fillna(0) >= min_ivhv)
+            & (res["Delta"].abs().fillna(1) <= max_delta)
+        ].reset_index(drop=True)
+
+        st.caption(f"共 {len(filt)} / {len(res)} 个标的符合筛选条件")
+
+        if filt.empty:
+            st.info("没有符合条件的标的，请放宽筛选条件。")
+        else:
+            # ---- 图表：年化收益率排序 ----
+            chart = alt.Chart(filt).mark_bar(color="#2E86DE").encode(
+                x=alt.X("代码:N", sort="-y", title="标的"),
+                y=alt.Y("年化收益率:Q", title="年化收益率"),
+                tooltip=["代码", alt.Tooltip("年化收益率:Q", format=".2%"),
+                         alt.Tooltip("IV/HV:Q", format=".2f"),
+                         alt.Tooltip("Delta:Q", format=".2f")],
+            ).properties(height=280)
+            st.altair_chart(chart, use_container_width=True)
+
+            # ---- 结果表 ----
+            show = filt.copy()
+            show["年化收益率"] = show["年化收益率"].apply(fmt_pct)
+            show["行权概率"] = show["行权概率"].apply(fmt_pct)
+            show["OTM%"] = show["OTM%"].apply(fmt_pct)
+            show["HV30"] = show["HV30"].apply(fmt_pct)
+            show["IV"] = show["IV"].apply(fmt_pct)
+
+            st.dataframe(
+                show.style.format({
+                    "现价": "{:.2f}",
+                    "IV/HV": "{:.2f}",
+                    "建议行权价": "{:.2f}",
+                    "Delta": "{:.3f}",
+                    "权利金": "{:.2f}",
+                    "权利金/张($)": "{:,.0f}",
+                    "占用资金/张($)": "{:,.0f}",
+                    "OI": "{:,.0f}",
+                    "成交量": "{:,.0f}",
+                }, na_rep="—"),
+                use_container_width=True, height=420,
+            )
+
+            st.caption(
+                "💡 IV/HV > 1 表示期权隐含波动率高于实际历史波动率，卖出 Put 相对更有优势；"
+                "|Delta| 越小则被行权概率越低。行情可能存在延迟，请结合券商实际报价下单。"
+            )
