@@ -13,17 +13,11 @@ st.set_page_config(layout="wide", page_title="Sell Put 策略管理系统", page
 
 # ================= 0. 全局常量 / 时区 =================
 DB_FILE = "portfolio.json"
-RISK_FREE_RATE = 0.045                        # 固定无风险利率（内部使用）
-US_TZ = ZoneInfo("America/New_York")          # 美股东部时区
-
-# 选股扫描内部参数
-SCAN_DTE_MIN = 14                             # 只扫描 14 天以上的期权
-SCAN_DTE_MAX = 60                             # 只扫描 60 天以内的期权
-SCAN_MAX_PER_TICKER = 3                       # 每个标的最多保留 3 个机会
+RISK_FREE_RATE = 0.045                        # 固定无风险利率
+US_TZ = ZoneInfo("America/New_York")
 
 
 def us_today() -> date:
-    """返回美国东部时区的当前日期（用于 DTE 计算）"""
     return datetime.now(US_TZ).date()
 
 
@@ -33,7 +27,7 @@ DEFAULT_COLUMNS = [
 ]
 
 
-# ================= 1. 本地数据持久化保存机制 =================
+# ================= 1. 本地数据持久化 =================
 def load_data():
     if os.path.exists(DB_FILE):
         try:
@@ -71,7 +65,7 @@ def save_data(df: pd.DataFrame):
         json.dump(records, f, ensure_ascii=False, indent=2)
 
 
-# ================= 2. 行情数据获取（带缓存） =================
+# ================= 2. 行情数据获取 =================
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_market(ticker: str):
     try:
@@ -101,7 +95,6 @@ def fetch_option_chain(ticker: str, expiry: str):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_expirations(ticker: str):
-    """获取标的全部到期日列表"""
     try:
         t = yf.Ticker(ticker)
         return list(t.options) if t.options else []
@@ -136,7 +129,7 @@ def get_option_quote(ticker: str, expiry: str, strike: float):
     }
 
 
-# ================= 3. Black-Scholes 定价与希腊字母 =================
+# ================= 3. Black-Scholes =================
 def bs_put(S, K, T, r, sigma):
     if S is None or np.isnan(S):
         return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
@@ -163,7 +156,7 @@ def bs_put(S, K, T, r, sigma):
     return price, delta, gamma, theta, vega, prob_itm
 
 
-# ================= 4. 持仓分析核心 =================
+# ================= 4. 持仓分析 =================
 def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
     today = us_today()
     r = RISK_FREE_RATE
@@ -260,12 +253,10 @@ def fmt_money(x):
 
 
 # ================= 5. 选股扫描 =================
-def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float,
-                              max_results: int = SCAN_MAX_PER_TICKER):
+def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
     """
-    扫描单个标的近月期权链，寻找 Sell Put 机会。
-    对每个 14-60 DTE 的到期日，找出最接近目标 OTM 的 Put，
-    若其年化收益率 >= min_annual，则纳入结果。
+    只扫描最近一期和下一期未到期的期权。
+    每个到期日找出最接近目标 OTM 的 Put，计算年化收益与综合评分。
     """
     mkt = fetch_market(ticker)
     if not mkt:
@@ -278,22 +269,26 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float,
         return []
 
     today = us_today()
-    results = []
-
-    for exp in exps:
+    # ---------- 只取最近两期 ----------
+    upcoming = []
+    for exp in sorted(exps):
         try:
             exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
             dte = (exp_date - today).days
         except Exception:
             continue
-        if dte < SCAN_DTE_MIN or dte > SCAN_DTE_MAX:
-            continue
+        if dte >= 1:
+            upcoming.append((exp, dte))
+        if len(upcoming) >= 2:
+            break
 
+    results = []
+    for exp, dte in upcoming:
         puts = fetch_option_chain(ticker, exp)
         if puts is None or puts.empty:
             continue
 
-        # 只看 OTM：行权价必须低于现价
+        # 只看 OTM（行权价低于现价）
         puts = puts[puts["strike"] < S].copy()
         if puts.empty:
             continue
@@ -303,7 +298,6 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float,
         row = puts.loc[idx]
         K = float(row["strike"])
 
-        # 优先买卖中间价，否则用最新成交价
         bid = row.get("bid", np.nan)
         ask = row.get("ask", np.nan)
         last = row.get("lastPrice", np.nan)
@@ -315,7 +309,7 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float,
         if pd.isna(mid) or mid <= 0:
             continue
 
-        # 权利金年化收益率 = (权利金 / 行权价) × (365 / DTE)
+        # 年化收益率 = 权利金 / 行权价 × 365 / DTE
         ann = (mid / K) * 365.0 / dte
         if ann < min_annual:
             continue
@@ -324,32 +318,22 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float,
         if pd.isna(iv) or iv <= 0:
             iv = hv
 
-        T = dte / 365.0
-        _, delta, _, _, _, prob_itm = bs_put(S, K, T, RISK_FREE_RATE, iv)
+        actual_otm = (S - K) / S
+        # 评分 = 年化收益 × 距离现价%² ÷ 波动率(IV)
+        score = (ann * (actual_otm ** 2) / iv) if pd.notna(iv) and iv > 0 else np.nan
 
         results.append({
             "代码": ticker,
             "现价": S,
             "行权价": K,
-            "距离现价%": (S - K) / S,          # OTM 幅度（正数表示低于现价）
+            "距离现价%": actual_otm,
             "到期日": exp,
-            "剩余天数": dte,
             "权利金": mid,
-            "权利金/张($)": mid * 100,
-            "年化收益率": ann,                  # 权利金年化
-            "Delta": delta,
-            "行权概率": prob_itm,
-            "IV": iv,
-            "HV30": hv,
-            "IV/HV": (iv / hv) if hv and hv > 0 else np.nan,
-            "占用资金/张($)": K * 100,
-            "OI": row.get("openInterest", np.nan),
-            "成交量": row.get("volume", np.nan),
+            "年化收益率": ann,
+            "评分": score,
         })
 
-    # 每个标的按年化降序，最多保留 max_results 个
-    results.sort(key=lambda x: x["年化收益率"], reverse=True)
-    return results[:max_results]
+    return results
 
 
 # ================= 6. 主界面 =================
@@ -360,7 +344,6 @@ if "df" not in st.session_state:
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
-# ---------- 侧边栏 ----------
 with st.sidebar:
     st.header("⚙️ 操作")
     if st.button("🔄 刷新行情缓存", use_container_width=True):
@@ -531,8 +514,8 @@ with tab_manage:
 with tab_screen:
     st.subheader("🔍 Sell Put 选股扫描")
     st.caption(
-        "输入标的列表，设定目标 OTM 幅度与最低年化收益率，"
-        "系统自动扫描 14–60 天到期的期权链，找出符合条件的最佳 Sell Put 机会。"
+        "只扫描最近一期和下一期未到期的期权。"
+        "评分 = 年化收益 × 距离现价%² ÷ 隐含波动率(IV)，分数越高越值得关注。"
     )
 
     tickers_input = st.text_area(
@@ -545,8 +528,7 @@ with tab_screen:
     otm_target = c1.slider(
         "目标 OTM 幅度（低于现价 %）",
         min_value=1, max_value=30, value=7, step=1,
-        help="行权价相对当前股价的折价幅度。例如 7% 表示行权价 = 现价 × (1 − 0.07)，"
-             "系统会自动找出最接近该幅度的 Put。",
+        help="行权价相对当前股价的折价幅度。例如 7% 表示行权价 = 现价 × (1 − 0.07)。",
     ) / 100.0
     min_annual = c2.slider(
         "最低年化收益率 (%)",
@@ -580,20 +562,22 @@ with tab_screen:
         if res.empty:
             st.info("没有找到符合条件的 Sell Put 机会。请降低年化门槛，或调整 OTM 幅度后重试。")
         else:
-            res = res.sort_values("年化收益率", ascending=False).reset_index(drop=True)
-            st.caption(f"共找到 {len(res)} 个机会（按年化收益率降序）")
+            res = res.sort_values("评分", ascending=False).reset_index(drop=True)
+            st.caption(f"共找到 {len(res)} 个机会（按评分降序）")
 
-            # 年化收益率柱状图
-            chart = alt.Chart(res).mark_bar(color="#2E86DE").encode(
-                x=alt.X("代码:N", sort="-y", title="标的"),
-                y=alt.Y("年化收益率:Q", title="年化收益率",
-                        axis=alt.Axis(format="%")),
+            # 评分柱状图
+            res_chart = res.copy()
+            res_chart["标签"] = res_chart["代码"] + " " + res_chart["到期日"].str[5:]
+            chart = alt.Chart(res_chart).mark_bar(color="#2E86DE").encode(
+                x=alt.X("标签:N", sort="-y", title="标的 / 到期日"),
+                y=alt.Y("评分:Q", title="评分"),
                 tooltip=[
                     alt.Tooltip("代码:N"),
+                    alt.Tooltip("到期日:N"),
                     alt.Tooltip("行权价:Q", format=".2f"),
                     alt.Tooltip("距离现价%:Q", format=".2%"),
                     alt.Tooltip("年化收益率:Q", format=".2%"),
-                    alt.Tooltip("剩余天数:Q"),
+                    alt.Tooltip("评分:Q", format=".4f"),
                 ],
             ).properties(height=280)
             st.altair_chart(chart, use_container_width=True)
@@ -602,14 +586,10 @@ with tab_screen:
             show = res.copy()
             show["距离现价%"] = show["距离现价%"].apply(fmt_pct)
             show["年化收益率"] = show["年化收益率"].apply(fmt_pct)
-            show["行权概率"] = show["行权概率"].apply(fmt_pct)
-            show["IV"] = show["IV"].apply(fmt_pct)
-            show["HV30"] = show["HV30"].apply(fmt_pct)
 
             cols = [
-                "代码", "现价", "行权价", "距离现价%", "到期日", "剩余天数",
-                "权利金", "年化收益率", "Delta", "行权概率", "IV/HV",
-                "占用资金/张($)",
+                "代码", "现价", "行权价", "距离现价%",
+                "到期日", "权利金", "年化收益率", "评分",
             ]
 
             st.dataframe(
@@ -617,15 +597,13 @@ with tab_screen:
                     "现价": "{:.2f}",
                     "行权价": "{:.2f}",
                     "权利金": "{:.2f}",
-                    "Delta": "{:.3f}",
-                    "IV/HV": "{:.2f}",
-                    "占用资金/张($)": "{:,.0f}",
+                    "评分": "{:.4f}",
                 }, na_rep="—"),
                 use_container_width=True, height=420,
             )
 
             st.caption(
-                "💡 年化收益率 = 权利金 / 行权价 × 365 / 剩余天数；"
-                "距离现价% 表示行权价相对当前股价的折价幅度。"
-                "数据来自 Yahoo Finance，可能存在延迟。"
+                "💡 评分公式：年化收益 × 距离现价%² ÷ IV。"
+                "距离现价% 取平方，是为了强调安全边际；"
+                "除以 IV 则对高波动标的做出风险惩罚。"
             )
