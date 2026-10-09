@@ -9,7 +9,9 @@ from scipy.stats import norm
 
 st.set_page_config(layout="wide", page_title="Sell Put 策略管理系统", page_icon="📈")
 
-# ================= 1. 本地数据持久化保存机制 =================
+# ================= ================= =================
+# 1. 本地数据持久化保存机制
+# ================= ================= =================
 DB_FILE = "portfolio.json"
 
 def load_data():
@@ -41,9 +43,10 @@ if 'portfolio_data' not in st.session_state:
     st.session_state.portfolio_data = load_data()
 
 
-# ================= 2. 核心数学模型：期权行权概率精算 =================
+# ================= ================= =================
+# 2. 核心数学模型：期权行权概率精算
+# ================= ================= =================
 def estimate_itm_probability_v2(ticker_symbol, strike, expiration_str):
-    """利用真实到期日和 DTE 精算 Sell Put 被行权概率"""
     try:
         today = datetime.today().date()
         exp_date = datetime.strptime(expiration_str, "%Y-%m-%d").date()
@@ -80,7 +83,9 @@ def estimate_itm_probability_v2(ticker_symbol, strike, expiration_str):
             return None, "N/A"
 
 
-# ================= 3. 数据层封装：持仓实时指标计算 (彻底杜绝嵌套缩进) =================
+# ================= ================= =================
+# 3. 数据层封装函数
+# ================= ================= =================
 def fetch_portfolio_metrics(df):
     results = []
     total_credit_usd = 0.0
@@ -129,7 +134,6 @@ def fetch_portfolio_metrics(df):
     return results, total_credit_usd, high_risk_count
 
 
-# ================= 4. 数据层封装：股票分析筛选 (独立干净函数，100%对齐) =================
 def screen_potential_tickers(tickers, min_price):
     screen_results = []
     for t_sym in tickers:
@@ -169,36 +173,10 @@ def screen_potential_tickers(tickers, min_price):
     return screen_results
 
 
-# ================= 5. 视图层：侧边栏全局添加控制 =================
-st.sidebar.header("⚙️ 控制面板")
-menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("➕ 在此添加新持仓")
-with st.sidebar.form(key="add_position_form", clear_on_submit=True):
-    new_ticker = st.text_input("股票代码 (如 NVDA)", value="").upper().strip()
-    new_strike = st.number_input("下单行权价 (Strike)", min_value=0.0, value=100.0, step=0.5)
-    new_credit = st.number_input("收入单张权利金 (Credit)", min_value=0.0, value=1.0, step=0.1)
-    new_qty = st.number_input("持仓数量 (张)", min_value=1, value=1, step=1)
-    new_exp = st.date_input("期权到期日 (Expiration)", value=datetime.today())
-    submit_button = st.form_submit_button(label="确认保存新持仓", use_container_width=True)
-
-if submit_button:
-    if new_ticker:
-        new_row = pd.DataFrame([{
-            "股票代码": new_ticker, "下单行权价(Strike)": new_strike, "收入权利金(Credit)": new_credit,
-            "持仓数量(张)": int(new_qty), "到期日": new_exp.strftime('%Y-%m-%d')
-        }])
-        st.session_state.portfolio_data = pd.concat([st.session_state.portfolio_data, new_row], ignore_index=True)
-        save_data(st.session_state.portfolio_data)
-        st.sidebar.success(f"成功保存 {new_ticker} 并存档！")
-        st.rerun()
-    else:
-        st.sidebar.error("请输入有效的股票代码！")
-
-
-# ================= 模块一：💼 当前持仓管理视图 =================
-if menu == "💼 当前持仓管理":
+# ================= ================= =================
+# 4. 视图渲染层封装 (将独立视图单独抽出，解决分支对齐漏洞)
+# ================= ================= =================
+def render_portfolio_view():
     st.title("💼 当前持仓动态透视")
     st.write("勾选表格最左侧并点击下方按钮，可完成移除持仓操作。")
     st.markdown("---")
@@ -207,45 +185,78 @@ if menu == "💼 当前持仓管理":
 
     if df.empty:
         st.info("目前没有任何持仓数据，请在左侧侧边栏输入并录入新持仓。")
-    else:
-        with st.spinner("正在获取实时股价，并结合 DTE 严密精算行权概率..."):
-            results, total_credit_usd, high_risk_count = fetch_portfolio_metrics(df)
+        return
 
-        res_df = pd.DataFrame(results)
+    with st.spinner("正在获取实时股价，并结合 DTE 严密精算行权概率..."):
+        results, total_credit_usd, high_risk_count = fetch_portfolio_metrics(df)
+
+    res_df = pd.DataFrame(results)
+    
+    # 顶部宏观卡片看板
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    with metric_col1:
+        st.metric(label="💼 运行中的期权单", value=f"{len(df)} 笔")
+    with metric_col2:
+        st.metric(label="💰 累计锁定权利金", value=f"${total_credit_usd:.2f}")
+    with metric_col3:
+        st.metric(label="🚨 处于高风险仓位 (>50%行权率)", value=f"{high_risk_count} 笔")
         
-        # 顶部宏观卡片
-        metric_col1, metric_col2, metric_col3 = st.columns(3)
-        with metric_col1:
-            st.metric(label="💼 运行中的期权单", value=f"{len(df)} 笔")
-        with metric_col2:
-            st.metric(label="💰 累计锁定权利金", value=f"${total_credit_usd:.2f}")
-        with metric_col3:
-            st.metric(label="🚨 处于高风险仓位 (>50%行权率)", value=f"{high_risk_count} 笔")
-            
-        st.markdown("")
-        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率']
-        display_df = res_df[cols]
-        
-        st.subheader("📊 实时持仓监控盘面")
-        edited_df = st.data_editor(
-            display_df,
-            use_container_width=True,
-            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率'],
-            key="portfolio_editor_v5"
-        )
-        
-        st.markdown("")
-        if st.button("🗑️ 删除表格选中持仓", type="primary"):
-            selected_indices = edited_df[edited_df["勾选删除"] == True].index.tolist()
-            if selected_indices:
-                real_indices_to_drop = [res_df.iloc[i]["原始索引"] for i in selected_indices]
-                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(real_indices_to_drop).reset_index(drop=True)
-                save_data(st.session_state.portfolio_data)
-                st.success(f"成功删除 {len(real_indices_to_drop)} 个持仓项！")
-                st.rerun()
+    st.markdown("")
+    cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率']
+    display_df = res_df[cols]
+    
+    st.subheader("📊 实时持仓监控盘面")
+    edited_df = st.data_editor(
+        display_df,
+        use_container_width=True,
+        disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率'],
+        key="portfolio_editor_v5"
+    )
+    
+    st.markdown("")
+    if st.button("🗑️ 删除表格选中持仓", type="primary"):
+        selected_indices = edited_df[edited_df["勾选删除"] == True].index.tolist()
+        if selected_indices:
+            real_indices_to_drop = [res_df.iloc[i]["原始索引"] for i in selected_indices]
+            st.session_state.portfolio_data = st.session_state.portfolio_data.drop(real_indices_to_drop).reset_index(drop=True)
+            save_data(st.session_state.portfolio_data)
+            st.success(f"成功删除 {len(real_indices_to_drop)} 个持仓项！")
+            st.rerun()
+        else:
+            st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击本删除按钮。")
+
+
+def render_screening_view():
+    st.title("🔍 Sell Put 潜在股票筛选神器")
+    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
+    
+    col_input, col_param = st.columns()
+    with col_input:
+        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA）", "AAPL, TSLA, NVDA")
+    with col_param:
+        min_price = st.number_input("最低股价过滤 ($)", min_value=0.0, value=50.0)
+
+    if st.button("🚀 开始抓取并筛选数据", type="primary"):
+        tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+        if not tickers:
+            st.error("请输入至少一个股票代码！")
+        else:
+            with st.spinner("正在连线雅虎财经..."):
+                screen_results = screen_potential_tickers(tickers, min_price)
+                    
+            if screen_results:
+                st.subheader("📊 扫描筛选结果透视表")
+                st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
             else:
-                st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击本删除按钮。")
+                st.info("没有满足您条件的股票。")
 
 
-# ================= 模块二：🔍 筛选合适股票视图 =================
-elif menu == "🔍 筛选合适股票":
+# ================= ================= =================
+# 5. 统一入口与侧边栏渲染控制流
+# ================= ================= =================
+st.sidebar.header("⚙️ 控制面板")
+menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ 在此添加新持仓")
+with st.sidebar.form(key="add_position_form", clear_on_submit=True):
