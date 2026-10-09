@@ -17,13 +17,17 @@ def load_data():
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return pd.DataFrame(data)
+                df = pd.DataFrame(data)
+                # 兼容旧数据补全机制：如果没有数量列，默认补1
+                if "持仓数量(张)" not in df.columns:
+                    df["持仓数量(张)"] = 1
+                return df
         except:
             pass
-    # 默认初始持仓数据
+    # 默认初始持仓数据（加入数量字段）
     return pd.DataFrame([
-        {"股票代码": "AAPL", "下单行权价(Strike)": 220.0, "收入权利金(Credit)": 1.50},
-        {"股票代码": "TSLA", "下单行权价(Strike)": 240.0, "收入权利金(Credit)": 3.80}
+        {"股票代码": "AAPL", "下单行权价(Strike)": 220.0, "收入权利金(Credit)": 1.50, "持仓数量(张)": 2},
+        {"股票代码": "TSLA", "下单行权价(Strike)": 240.0, "收入权利金(Credit)": 3.80, "持仓数量(张)": 1}
     ])
 
 def save_data(df):
@@ -67,18 +71,23 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
 st.sidebar.header("⚙️ 控制面板")
 menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
 
-# 将添加区域永久固定在左侧菜单下方，避开所有弹窗组件 bug
 st.sidebar.markdown("---")
 st.sidebar.subheader("➕ 在此添加新持仓")
 with st.sidebar.form(key="add_position_form", clear_on_submit=True):
     new_ticker = st.text_input("股票代码 (如 NVDA)", value="").upper().strip()
     new_strike = st.number_input("下单行权价 (Strike)", min_value=0.0, value=100.0, step=0.5)
-    new_credit = st.number_input("收入权利金 (Credit)", min_value=0.0, value=1.0, step=0.1)
+    new_credit = st.number_input("收入单张权利金 (Credit)", min_value=0.0, value=1.0, step=0.1)
+    new_qty = st.number_input("持仓数量 (张)", min_value=1, value=1, step=1) # 🌟 新增数量输入
     submit_button = st.form_submit_button(label="确认保存新持仓", use_container_width=True)
 
 if submit_button:
     if new_ticker:
-        new_row = pd.DataFrame([{"股票代码": new_ticker, "下单行权价(Strike)": new_strike, "收入权利金(Credit)": new_credit}])
+        new_row = pd.DataFrame([{
+            "股票代码": new_ticker, 
+            "下单行权价(Strike)": new_strike, 
+            "收入权利金(Credit)": new_credit,
+            "持仓数量(张)": int(new_qty) # 🌟 保存数量
+        }])
         st.session_state.portfolio_data = pd.concat([st.session_state.portfolio_data, new_row], ignore_index=True)
         save_data(st.session_state.portfolio_data)
         st.sidebar.success(f"成功保存 {new_ticker} 并存档！")
@@ -89,13 +98,8 @@ if submit_button:
 # ================= 模块一：💼 当前持仓管理（主页） =================
 if menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
+    st.write("勾选表格最左侧并点击下方按钮，可完成移除持仓操作。")
     
-    # --- 頂部操作按鈕區 ---
-    btn_col1, btn_col2 = st.columns([2.5, 7.5])
-    with btn_col1:
-        # 点击该按钮直接删除下面表格中勾选为 True 的行
-        delete_clicked = st.button("🗑️ 删除表格选中持仓", type="primary", use_container_width=True)
-
     st.markdown("---")
 
     df = st.session_state.portfolio_data
@@ -104,11 +108,19 @@ if menu == "💼 当前持仓管理":
         st.info("目前没有任何持仓数据，请在左侧侧边栏输入并录入新持仓。")
     else:
         results = []
+        total_credit_usd = 0.0 # 累计总权利金初始化
+        high_risk_count = 0    # 高风险单统计初始化
+        
         with st.spinner("正在获取实时股价，并严密推算行权概率..."):
             for index, row in df.iterrows():
                 ticker_str = str(row["股票代码"]).upper().strip()
                 strike = float(row["下单行权价(Strike)"])
                 credit = float(row["收入权利金(Credit)"])
+                qty = int(row.get("持仓数量(张)", 1)) # 🌟 读取数量
+                
+                # 计算这笔单子的真实总收益金（美股1张期权合约=100股正股）
+                position_total_credit = credit * qty * 100
+                total_credit_usd += position_total_credit
                 
                 try:
                     t = yf.Ticker(ticker_str)
@@ -116,38 +128,62 @@ if menu == "💼 当前持仓管理":
                     
                     price_diff_pct = ((current_price - strike) / current_price) * 100
                     prob = estimate_itm_probability(ticker_str, strike, is_put=True)
-                    prob_str = f"{prob*100:.1f}%" if prob is not None else "无法估算"
+                    
+                    if prob is not None:
+                        prob_val = prob * 100
+                        prob_str = f"{prob_val:.1f}%"
+                        if prob_val > 50.0:
+                            high_risk_count += 1
+                    else:
+                        prob_str = "无法估算"
                     
                     results.append({
                         "原始索引": index,
                         "股票代码": ticker_str,
+                        "持仓数量 (张)": qty,
                         "行权价 (Strike)": strike,
-                        "权利金 (Credit)": credit,
-                        "当前估价 (Current)": round(current_price, 2),
+                        "单张权利金 (Credit)": credit,
+                        "估计总权利金": f"${position_total_credit:.2f}",
+                        "当前正股价 (Current)": round(current_price, 2),
                         "距行权安全垫 (%)": f"{price_diff_pct:.2f}%",
                         "预计被行权概率": prob_str,
                         "勾选删除": False  
                     })
                 except:
                     results.append({
-                        "原始索引": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A", "勾选删除": False
+                        "原始索引": index, "股票代码": ticker_str, "持仓数量 (张)": qty, "行权价 (Strike)": strike, "单张权利金 (Credit)": credit, "估计总权利金": f"${position_total_credit:.2f}", "当前正股价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A", "勾选删除": False
                     })
 
         res_df = pd.DataFrame(results)
         
-        # 调整列顺序，让勾选框呆在最左侧
-        cols = ['勾选删除', '股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率']
+        # --- 🌟 顶部加入数据可视化卡片看板 ---
+        metric_col1, metric_col2, metric_col3 = st.columns(3)
+        with metric_col1:
+            st.metric(label="💼 运行中的期权单", value=f"{len(df)} 笔")
+        with metric_col2:
+            st.metric(label="💰 累计锁定权利金", value=f"${total_credit_usd:.2f}")
+        with metric_col3:
+            st.metric(label="🚨 处于高风险仓位 (>50%行权率)", value=f"{high_risk_count} 笔")
+            
+        st.markdown("")
+
+        # 调整列顺序，确保“持仓数量”和“估计总权利金”优雅地呆在报表里
+        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '预计被行权概率']
         display_df = res_df[cols]
         
         st.subheader("📊 实时持仓监控盘面")
         
-        # 数据编辑器，只开放勾选删除列的可编辑权限
+        # 渲染数据表格
         edited_df = st.data_editor(
             display_df,
             use_container_width=True,
-            disabled=['股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率'],
-            key="portfolio_editor_v3"
+            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '预计被行权概率'],
+            key="portfolio_editor_v4"
         )
+        
+        # --- 删除按钮置于表格上方紧凑分布 ---
+        st.markdown("")
+        delete_clicked = st.button("🗑️ 删除表格选中持仓", type="primary")
         
         # 删除触发逻辑
         if delete_clicked:
@@ -160,7 +196,7 @@ if menu == "💼 当前持仓管理":
                 st.success(f"成功删除 {len(real_indices_to_drop)} 个持仓项！")
                 st.rerun()
             else:
-                st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
+                st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击『🗑️ 删除表格选中持仓』。")
 
 # ================= 模块二：🔍 筛选合适股票 =================
 elif menu == "🔍 筛选合适股票":
@@ -208,16 +244,3 @@ elif menu == "🔍 筛选合适股票":
                         else:
                             advice = "✅ 适合 Sell Put (估值或波动较稳健)"
 
-                        screen_results.append({
-                            "股票代码": t_sym, "当前股价": f"${price:.2f}", "市盈率 (PE)": pe_str, "52周最低价距离": dist_str, "波动率系数 (Beta)": beta_str, "策略初评建议": advice
-                        })
-                    except:
-                        screen_results.append({
-                            "股票代码": t_sym, "当前股价": "抓取失败", "市盈率 (PE)": "N/A", "52周最低价距离": "N/A", "波动率系数 (Beta)": "N/A", "策略初评建议": "❌ 无法获取该股票信息"
-                        })
-                        
-            if screen_results:
-                st.subheader("📊 扫描筛选结果透视表")
-                st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
-            else:
-                st.info("没有满足您条件的股票。")
