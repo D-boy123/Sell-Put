@@ -67,7 +67,7 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
 menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
 
 # ================= 模块一：💼 当前持仓管理（主页） =================
-if menu == "💼 当前持仓 management" or menu == "💼 当前持仓管理":
+if menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
     
     # --- 顶栏操作区：添加新持仓 ---
@@ -114,7 +114,7 @@ if menu == "💼 当前持仓 management" or menu == "💼 当前持仓管理":
                     prob_str = f"{prob*100:.1f}%" if prob is not None else "无法估算"
                     
                     results.append({
-                        "原始索引": index, # 隐藏用作底层的真实删除凭证
+                        "原始索引": index,
                         "股票代码": ticker_str,
                         "行权价 (Strike)": strike,
                         "权利金 (Credit)": credit,
@@ -128,33 +128,31 @@ if menu == "💼 当前持仓 management" or menu == "💼 当前持仓管理":
                     })
 
         res_df = pd.DataFrame(results)
-        
-        # 隐藏掉技术索引列，让用户看到的表格完全纯净
         display_df = res_df.drop(columns=["原始索引"])
         
         st.subheader("📊 实时持仓监控盘面")
+        # 移除了所有高版本专属参数，完全兼容老版本
+        st.dataframe(display_df, use_container_width=True)
         
-        # 🌟 核心升级：利用 selection_mode="multi" 让表格自带复选框
-        event = st.dataframe(
-            display_df, 
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="multi"
-        )
+        # --- 极其低调不占地方的单行删除区 ---
+        st.markdown("---")
+        del_col1, del_col2 = st.columns([3, 1]) # 让下拉框占大头，删除按钮占小头
         
-        # 获取用户在表格中勾选的行数
-        selected_rows = event.selection.rows
-        
-        # 🌟 如果有行被勾选，直接动态在表格下方冒出删除按钮！
-        if len(selected_rows) > 0:
-            st.markdown("")
-            if st.button(f"🗑️ 删除选中的 {len(selected_rows)} 个持仓项", type="primary"):
-                # 通过选中的相对行号，映射回真正的 portfolio 索引进行剔除
-                indices_to_drop = [res_df.iloc[r]["原始索引"] for r in selected_rows]
+        with del_col1:
+            # 动态生成一串精简的删除选项
+            delete_options = [f"{r['股票代码']} (Strike: {r['行权价 (Strike)']})" for r in results]
+            selected_option = st.selectbox("选择一笔已结清的持仓以供移除：", delete_options, label_visibility="collapsed")
+            
+        with del_col2:
+            if st.button("🗑️ 确认删除", type="primary", use_container_width=True):
+                # 找到对应行在原始数据里的真实 index 
+                selected_idx = delete_options.index(selected_option)
+                target_real_id = results[selected_idx]["原始索引"]
                 
-                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(indices_to_drop).reset_index(drop=True)
+                # 删除并同步文件
+                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(target_real_id).reset_index(drop=True)
                 save_data(st.session_state.portfolio_data)
-                st.success("选中的持仓已成功移除！")
+                st.success("持仓已移除！")
                 st.rerun()
 
 # ================= 模块二：🔍 筛选合适股票 =================
