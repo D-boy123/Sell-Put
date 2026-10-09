@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime, date
 from scipy.stats import norm
-import plotly.graph_objects as go
+import altair as alt
 
 st.set_page_config(layout="wide", page_title="Sell Put 策略管理系统", page_icon="📈")
 
@@ -339,19 +339,26 @@ with tab_overview:
             grid = np.linspace(lo, hi, 200)
             payoff = np.where(grid >= K, prem, prem - (K - grid)) * 100 * qty
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=grid, y=payoff, mode="lines",
-                                     name="到期损益", line=dict(color="#2E86DE", width=2)))
-            fig.add_hline(y=0, line_dash="dot", line_color="gray")
-            fig.add_vline(x=K, line_dash="dash", line_color="red",
-                          annotation_text=f"行权价 {K:.1f}")
-            fig.add_vline(x=K - prem, line_dash="dash", line_color="green",
-                          annotation_text=f"盈亏平衡 {K-prem:.2f}")
-            fig.add_vline(x=S0, line_dash="dot", line_color="black",
-                          annotation_text=f"现价 {S0:.2f}")
-            fig.update_layout(height=420, xaxis_title="到期股价 ($)",
-                              yaxis_title="损益 ($)", template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
+            chart_df = pd.DataFrame({"股价": grid, "损益": payoff})
+            base = alt.Chart(chart_df).mark_line(
+                color="#2E86DE", strokeWidth=2
+            ).encode(
+                x=alt.X("股价:Q", title="到期股价 ($)"),
+                y=alt.Y("损益:Q", title="损益 ($)"),
+            )
+            zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+                strokeDash=[4, 4], color="gray").encode(y="y:Q")
+            strike_rule = alt.Chart(pd.DataFrame({"x": [K]})).mark_rule(
+                strokeDash=[6, 4], color="red").encode(x="x:Q")
+            be_rule = alt.Chart(pd.DataFrame({"x": [K - prem]})).mark_rule(
+                strokeDash=[6, 4], color="green").encode(x="x:Q")
+            spot_rule = alt.Chart(pd.DataFrame({"x": [S0]})).mark_rule(
+                strokeDash=[2, 4], color="black").encode(x="x:Q")
+
+            st.altair_chart(
+                (base + zero_rule + strike_rule + be_rule + spot_rule).properties(height=420),
+                use_container_width=True,
+            )
 
 # ================= Tab 2: 持仓管理 =================
 with tab_manage:
