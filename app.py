@@ -199,7 +199,7 @@ if menu == "💼 当前持仓管理":
             else:
                 st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
 
-# ================= 模块二：🔍 筛选合适股票（精简结构，完全对齐） =================
+# ================= 模块二：🔍 筛选合适股票（完全扁平化重写，零缩进隐患） =================
 elif menu == "🔍 筛选合适股票":
     st.title("🔍 Sell Put 潜在股票筛选神器")
     st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
@@ -219,18 +219,16 @@ elif menu == "🔍 筛选合适股票":
             screen_results = []
             with st.spinner("正在连线雅虎财经..."):
                 for t_sym in tickers:
+                    # 彻底移除可能引起缩进混淆的内部 try-except 深度包裹，采用扁平化保护机制
                     try:
                         t_obj = yf.Ticker(t_sym)
                         fast = t_obj.fast_info
                         price = fast['last_price']
                         
-                        if price < min_price:
-                            continue
+                        if price >= min_price:
+                            info = t_obj.info
+                            pe = info.get('trailingPE', np.nan)
+                            pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
                             
-                        info = t_obj.info
-                        pe = info.get('trailingPE', np.nan)
-                        pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
-                        
-                        fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
-                        dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
-                        dist_str = f"+{dist_from_low:.1f}%" if pd.notnull(dist_from_low) else "N/A"
+                            fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
+                            dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
