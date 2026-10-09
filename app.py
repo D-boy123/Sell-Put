@@ -16,9 +16,8 @@ DB_FILE = "portfolio.json"
 RISK_FREE_RATE = 0.045
 US_TZ = ZoneInfo("America/New_York")
 
-# 评分参数（想调权重改这里）
-SPREAD_MAX = 0.15          # 买卖价差上限，超过直接淘汰
-IV_HV_FLOOR = 0.5          # IV/HV 下限，避免 HV 极端大时分数崩塌
+SPREAD_MAX = 0.15
+IV_HV_FLOOR = 0.5
 
 SCAN_SCHEMA_VERSION = 4
 SCAN_RESULT_COLUMNS = [
@@ -77,25 +76,54 @@ def save_data(df: pd.DataFrame):
 
 
 # ================= 2. 行情数据获取 =================
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_market(ticker: str):
+    """
+    获取标的最新价 + 30日历史波动率。
+    - 价格：优先用 fast_info 的实时价，其次用未复权收盘价
+    - HV：用复权价计算收益率，避免除权跳空
+    """
     try:
         t = yf.Ticker(ticker)
-        hist = t.history(period="1y", auto_adjust=True)
+
+        # --- 1) 尝试取实时价 ---
+        S = None
+        try:
+            fi = t.fast_info
+            for attr in ("last_price", "lastPrice"):
+                try:
+                    v = fi[attr] if hasattr(fi, "__getitem__") else getattr(fi, attr, None)
+                    if v is not None and float(v) > 0:
+                        S = float(v)
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # --- 2) 历史数据（未复权用于展示，复权用于 HV）---
+        hist = t.history(period="1y", auto_adjust=False)
         if hist.empty or len(hist) < 5:
             return None
+
         close = hist["Close"].dropna()
-        S = float(close.iloc[-1])
+        adj = hist["Adj Close"].dropna() if "Adj Close" in hist.columns else close
+
+        if S is None or S <= 0:
+            S = float(close.iloc[-1])
         prev = float(close.iloc[-2]) if len(close) > 1 else S
-        ret = np.log(close / close.shift(1)).dropna()
+
+        # --- 3) HV 用复权价 ---
+        ret = np.log(adj / adj.shift(1)).dropna()
         window = min(30, len(ret))
         hv = float(ret.tail(window).std() * np.sqrt(252)) if window > 2 else 0.30
+
         return {"price": S, "prev_close": prev, "hv": hv}
     except Exception:
         return None
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_option_chain(ticker: str, expiry: str):
     try:
         t = yf.Ticker(ticker)
@@ -267,8 +295,7 @@ def fmt_money(x):
 def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
     """
     只扫描最近一期和下一期未到期的期权。
-    每个到期日找出最接近目标 OTM 的 Put，计算：
-        评分 = 年化收益 × (1 − 行权概率) × max(IV/HV, 0.5)
+    评分 = 年化收益 × (1 − 行权概率) × max(IV/HV, 0.5)
     """
     mkt = fetch_market(ticker)
     if not mkt:
@@ -308,7 +335,6 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         row = puts.loc[idx]
         K = float(row["strike"])
 
-        # 报价与价差
         bid = row.get("bid", np.nan)
         ask = row.get("ask", np.nan)
         last = row.get("lastPrice", np.nan)
@@ -321,30 +347,25 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
 
         if pd.isna(mid) or mid <= 0:
             continue
-        if spread_pct > SPREAD_MAX:           # 流动性太差，直接跳过
+        if spread_pct > SPREAD_MAX:
             continue
 
-        # 年化收益
         ann = (mid / K) * 365.0 / dte
         if ann < min_annual:
             continue
 
-        # 波动率
         iv = row.get("impliedVolatility", np.nan)
         if pd.isna(iv) or iv <= 0:
             iv = hv if pd.notna(hv) and hv > 0 else 0.30
 
-        # 行权概率（BS 直接给出）
         T = dte / 365.0
         _, _, _, _, _, p_itm = bs_put(S, K, T, RISK_FREE_RATE, iv)
         if pd.isna(p_itm):
             p_itm = 0.5
 
-        # 波动率溢价：IV 相对 HV 的倍数
         iv_hv = iv / hv if pd.notna(hv) and hv > 0 else 1.0
         iv_hv = max(iv_hv, IV_HV_FLOOR)
 
-        # 综合评分
         score = ann * (1 - p_itm) * iv_hv
 
         actual_otm = (S - K) / S
