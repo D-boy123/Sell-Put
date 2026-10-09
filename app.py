@@ -63,47 +63,45 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
     except:
         return None
 
-# ================= 3. 侧边栏功能切换菜单 =================
+# ================= 3. 侧边栏功能切换菜单与【添加面板】 =================
+st.sidebar.header("⚙️ 控制面板")
 menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
+
+# 将添加区域永久固定在左侧菜单下方，避开所有弹窗组件 bug
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ 在此添加新持仓")
+with st.sidebar.form(key="add_position_form", clear_on_submit=True):
+    new_ticker = st.text_input("股票代码 (如 NVDA)", value="").upper().strip()
+    new_strike = st.number_input("下单行权价 (Strike)", min_value=0.0, value=100.0, step=0.5)
+    new_credit = st.number_input("收入权利金 (Credit)", min_value=0.0, value=1.0, step=0.1)
+    submit_button = st.form_submit_button(label="确认保存新持仓", use_container_width=True)
+
+if submit_button:
+    if new_ticker:
+        new_row = pd.DataFrame([{"股票代码": new_ticker, "下单行权价(Strike)": new_strike, "收入权利金(Credit)": new_credit}])
+        st.session_state.portfolio_data = pd.concat([st.session_state.portfolio_data, new_row], ignore_index=True)
+        save_data(st.session_state.portfolio_data)
+        st.sidebar.success(f"成功保存 {new_ticker} 并存档！")
+        st.rerun()
+    else:
+        st.sidebar.error("请输入有效的股票代码！")
 
 # ================= 模块一：💼 当前持仓管理（主页） =================
 if menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
     
-    # --- 頂部操作按鈕區（添加與刪除並排在一起） ---
-    btn_col1, btn_col2, btn_col3 = st.columns([1.5, 2, 6])
-    
+    # --- 頂部操作按鈕區 ---
+    btn_col1, btn_col2 = st.columns([2.5, 7.5])
     with btn_col1:
-        if st.button("➕ 添加新持仓", use_container_width=True):
-            st.dialog("add_position_modal") 
-            
-    with btn_col2:
-        # 显式的删除触发按钮
+        # 点击该按钮直接删除下面表格中勾选为 True 的行
         delete_clicked = st.button("🗑️ 删除表格选中持仓", type="primary", use_container_width=True)
-
-    @st.dialog("添加新持仓")
-    def add_position_modal():
-        st.write("请输入您的新期权单数据：")
-        new_ticker = st.text_input("股票代码 (如 AAPL, TSLA)", value="").upper().strip()
-        new_strike = st.number_input("下单行权价 (Strike Amount)", min_value=0.0, value=100.0, step=0.5)
-        new_credit = st.number_input("收入权利金 (Credit Amount)", min_value=0.0, value=1.0, step=0.1)
-        
-        if st.button("确认保存", use_container_width=True):
-            if new_ticker:
-                new_row = pd.DataFrame([{"股票代码": new_ticker, "下单行权价(Strike)": new_strike, "收入权利金(Credit)": new_credit}])
-                st.session_state.portfolio_data = pd.concat([st.session_state.portfolio_data, new_row], ignore_index=True)
-                save_data(st.session_state.portfolio_data)
-                st.success(f"成功添加 {new_ticker} 持仓并已本地存档！")
-                st.rerun() 
-            else:
-                st.error("请输入有效的股票代码！")
 
     st.markdown("---")
 
     df = st.session_state.portfolio_data
 
     if df.empty:
-        st.info("目前没有任何持仓数据，请点击上方按钮录入。")
+        st.info("目前没有任何持仓数据，请在左侧侧边栏输入并录入新持仓。")
     else:
         results = []
         with st.spinner("正在获取实时股价，并严密推算行权概率..."):
@@ -128,7 +126,7 @@ if menu == "💼 当前持仓管理":
                         "当前估价 (Current)": round(current_price, 2),
                         "距行权安全垫 (%)": f"{price_diff_pct:.2f}%",
                         "预计被行权概率": prob_str,
-                        "勾选删除": False  # 显式提供复选框底层数据
+                        "勾选删除": False  
                     })
                 except:
                     results.append({
@@ -137,30 +135,26 @@ if menu == "💼 当前持仓管理":
 
         res_df = pd.DataFrame(results)
         
-        # 重新排序列顺序，把“勾选删除”放到最前面，更符合操作习惯
+        # 调整列顺序，让勾选框呆在最左侧
         cols = ['勾选删除', '股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率']
         display_df = res_df[cols]
         
         st.subheader("📊 实时持仓监控盘面")
         
-        # 利用 data_editor 渲染，只允许用户编辑“勾选删除”这一列，其余列锁定
+        # 数据编辑器，只开放勾选删除列的可编辑权限
         edited_df = st.data_editor(
             display_df,
             use_container_width=True,
             disabled=['股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率'],
-            key="portfolio_editor_v2"
+            key="portfolio_editor_v3"
         )
         
-        # 处理删除核心逻辑
+        # 删除触发逻辑
         if delete_clicked:
-            # 找出所有被勾选为 True 的行的相对索引
             selected_indices = edited_df[edited_df["勾选删除"] == True].index.tolist()
             
             if selected_indices:
-                # 映射回原始持仓 dataframe 的索引
                 real_indices_to_drop = [res_df.iloc[i]["原始索引"] for i in selected_indices]
-                
-                # 执行删除并写回 JSON 文件
                 st.session_state.portfolio_data = st.session_state.portfolio_data.drop(real_indices_to_drop).reset_index(drop=True)
                 save_data(st.session_state.portfolio_data)
                 st.success(f"成功删除 {len(real_indices_to_drop)} 个持仓项！")
