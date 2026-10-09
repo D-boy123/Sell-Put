@@ -153,14 +153,14 @@ if menu == "💼 当前持仓管理":
                         "原始索引": index, "股票代码": ticker_str, "持仓数量 (张)": qty, "行权价 (Strike)": strike,
                         "单张权利金 (Credit)": credit, "估计总权利金": f"${position_total_credit:.2f}",
                         "当前正股价 (Current)": round(current_price, 2), "距行权安全垫 (%)": f"{price_diff_pct:.2f}%",
-                        "到期日": exp_str, "剩余天数 (DTE)": dte_str, "预计被行权概率": prob_str, "勾选删除": False  
+                        "到期日": exp_str, "Remaining天数 (DTE)": dte_str, "预计被行权概率": prob_str, "勾选删除": False  
                     })
                 except:
                     results.append({
                         "原始索引": index, "股票代码": ticker_str, "持仓数量 (张)": qty, "行权价 (Strike)": strike,
                         "单张权利金 (Credit)": credit, "估计总权利金": f"${position_total_credit:.2f}",
                         "当前正股价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A",
-                        "到期日": exp_str, "剩余天数 (DTE)": "N/A", "预计被行权概率": "N/A", "勾选删除": False
+                        "到期日": exp_str, "Remaining天数 (DTE)": "N/A", "预计被行权概率": "N/A", "勾选删除": False
                     })
 
         res_df = pd.DataFrame(results)
@@ -174,14 +174,14 @@ if menu == "💼 当前持仓管理":
             st.metric(label="🚨 处于高风险仓位 (>50%行权率)", value=f"{high_risk_count} 笔")
             
         st.markdown("")
-        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率']
+        cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率']
         display_df = res_df[cols]
         
         st.subheader("📊 实时持仓监控盘面")
         edited_df = st.data_editor(
             display_df,
             use_container_width=True,
-            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率'],
+            disabled=['股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', 'Remaining天数 (DTE)', '预计被行权概率'],
             key="portfolio_editor_v5"
         )
         
@@ -199,7 +199,7 @@ if menu == "💼 当前持仓管理":
             else:
                 st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
 
-# ================= 模块二：🔍 筛选合适股票（完全重新对齐对齐，绝无缩进错误） =================
+# ================= 模块二：🔍 筛选合适股票（精简结构，完全对齐） =================
 elif menu == "🔍 筛选合适股票":
     st.title("🔍 Sell Put 潜在股票筛选神器")
     st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
@@ -234,4 +234,3 @@ elif menu == "🔍 筛选合适股票":
                         fifty_two_week_low = info.get('fiftyTwoWeekLow', np.nan)
                         dist_from_low = ((price - fifty_two_week_low) / fifty_two_week_low * 100) if pd.notnull(fifty_two_week_low) else np.nan
                         dist_str = f"+{dist_from_low:.1f}%" if pd.notnull(dist_from_low) else "N/A"
-                        
