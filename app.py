@@ -5,13 +5,22 @@ import numpy as np
 import os
 import json
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from scipy.stats import norm
 import altair as alt
 
 st.set_page_config(layout="wide", page_title="Sell Put 策略管理系统", page_icon="📈")
 
-# ================= 1. 本地数据持久化保存机制 =================
+# ================= 0. 全局常量 / 时区 =================
 DB_FILE = "portfolio.json"
+RISK_FREE_RATE = 0.045                        # 固定无风险利率（内部使用，不显示）
+US_TZ = ZoneInfo("America/New_York")          # 美股东部时区
+
+
+def us_today() -> date:
+    """返回美国东部时区的当前日期（用于 DTE 计算）"""
+    return datetime.now(US_TZ).date()
+
 
 DEFAULT_COLUMNS = [
     "代码", "行权价", "到期日", "持仓数量(张)",
@@ -19,6 +28,7 @@ DEFAULT_COLUMNS = [
 ]
 
 
+# ================= 1. 本地数据持久化保存机制 =================
 def load_data():
     """从本地 JSON 文件读取持仓数据"""
     if os.path.exists(DB_FILE):
@@ -33,9 +43,9 @@ def load_data():
             if "持仓数量(张)" not in df.columns:
                 df["持仓数量(张)"] = 1
             if "到期日" not in df.columns:
-                df["到期日"] = datetime.today().strftime("%Y-%m-%d")
+                df["到期日"] = us_today().strftime("%Y-%m-%d")
             if "开仓日期" not in df.columns:
-                df["开仓日期"] = datetime.today().strftime("%Y-%m-%d")
+                df["开仓日期"] = us_today().strftime("%Y-%m-%d")
             if "状态" not in df.columns:
                 df["状态"] = "持仓中"
             if "平仓价" not in df.columns:
@@ -146,9 +156,10 @@ def bs_put(S, K, T, r, sigma):
 
 
 # ================= 4. 持仓分析核心 =================
-def analyze_positions(df: pd.DataFrame, r: float) -> pd.DataFrame:
-    """对每个持仓计算：现价、期权现价、浮盈、年化、希腊字母等"""
-    today = date.today()
+def analyze_positions(df: pd.DataFrame) -> pd.DataFrame:
+    """对每个持仓计算：现价、期权现价、浮盈、年化、行权概率等"""
+    today = us_today()          # 美东时区
+    r = RISK_FREE_RATE
     out = []
 
     for _, pos in df.iterrows():
@@ -197,7 +208,6 @@ def analyze_positions(df: pd.DataFrame, r: float) -> pd.DataFrame:
             ann = np.nan
         else:
             pnl = (premium - opt_price) * 100 * qty if pd.notna(opt_price) else np.nan
-            # 以行权价占用的现金为分母的年化收益率（剩余期间）
             if pd.notna(opt_price) and not np.isnan(dte) and dte > 0:
                 ann = (premium - opt_price) / K * 365.0 / dte
             elif not np.isnan(dte) and dte == 0:
@@ -205,7 +215,7 @@ def analyze_positions(df: pd.DataFrame, r: float) -> pd.DataFrame:
             else:
                 ann = np.nan
 
-        # 开仓时静态年化（基于权利金 / 行权价）
+        # 开仓时静态年化
         try:
             open_date = datetime.strptime(str(pos["开仓日期"])[:10], "%Y-%m-%d").date()
             dte_open = (exp_date - open_date).days if exp_date else np.nan
@@ -223,20 +233,16 @@ def analyze_positions(df: pd.DataFrame, r: float) -> pd.DataFrame:
             "权利金": premium,
             "现价": S,
             "期权现价": opt_price,
-            "市场价": mkt_price,
             "IV": iv,
             "浮动盈亏($)": pnl,
-            "最大收益($)": premium * 100 * qty,
             "占用资金($)": K * 100 * qty,
             "年化收益率": ann,
             "开仓年化": static_ann,
-            "Delta": delta,
-            "Gamma": gamma,
-            "Theta($/日)": (theta if pd.notna(theta) else 0) * 100 * qty,
-            "Vega($/1%)": (vega if pd.notna(vega) else 0) * 100 * qty,
             "行权概率": prob_itm,
             "距行权价%": ((S - K) / S) if pd.notna(S) and S else np.nan,
-            "盈亏平衡点": K - premium,
+            # 以下保留用于内部风险聚合，不直接展示在总览表
+            "Delta": delta,
+            "Theta($/日)": (theta if pd.notna(theta) else 0) * 100 * qty,
             "Delta敞口($)": (delta * 100 * qty * S) if pd.notna(delta) and pd.notna(S) else np.nan,
         })
 
@@ -257,21 +263,17 @@ st.title("📈 Sell Put 策略管理系统")
 if "df" not in st.session_state:
     st.session_state.df = load_data()
 
-# ---------- 侧边栏 ----------
+# ---------- 侧边栏（已简化） ----------
 with st.sidebar:
-    st.header("⚙️ 全局设置")
-    rf_pct = st.number_input("无风险利率 (%)", value=4.50, step=0.05, format="%.2f")
-    r = rf_pct / 100.0
-
-    st.divider()
+    st.header("⚙️ 操作")
     if st.button("🔄 刷新行情缓存", use_container_width=True):
         st.cache_data.clear()
         st.success("缓存已清空")
         st.rerun()
 
     st.divider()
-    st.caption(f"数据文件：`{os.path.abspath(DB_FILE)}`")
     st.caption(f"持仓记录：{len(st.session_state.df)} 条")
+    st.caption(f"美东日期：{us_today():%Y-%m-%d}")
 
 df = st.session_state.df
 
@@ -280,7 +282,7 @@ tab_overview, tab_manage, tab_risk, tab_data = st.tabs(
 )
 
 # ---------- 计算分析结果 ----------
-analysis = analyze_positions(df, r) if not df.empty else pd.DataFrame()
+analysis = analyze_positions(df) if not df.empty else pd.DataFrame()
 
 open_mask = analysis["状态"] == "持仓中" if not analysis.empty else pd.Series(dtype=bool)
 open_pos = analysis[open_mask] if not analysis.empty else pd.DataFrame()
@@ -290,23 +292,28 @@ with tab_overview:
     if analysis.empty:
         st.info("暂无持仓数据，请到「✏️ 持仓管理」标签页添加你的第一笔 Sell Put。")
     else:
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4 = st.columns(4)
         total_premium = open_pos["权利金"].mul(100).mul(open_pos["张数"]).sum() if not open_pos.empty else 0
         total_pnl = open_pos["浮动盈亏($)"].sum() if not open_pos.empty else 0
         total_cash = open_pos["占用资金($)"].sum() if not open_pos.empty else 0
         total_theta = open_pos["Theta($/日)"].sum() if not open_pos.empty else 0
-        avg_ann = open_pos["年化收益率"].mean() if not open_pos.empty else np.nan
 
         c1.metric("持仓中合约", f"{len(open_pos)} 笔")
         c2.metric("已收权利金", fmt_money(total_premium))
         c3.metric("浮动盈亏", fmt_money(total_pnl),
                   delta=f"{(total_pnl/total_cash*100):.2f}%" if total_cash else None)
         c4.metric("占用保证金", fmt_money(total_cash))
-        c5.metric("组合 Theta", f"${total_theta:,.2f}/日")
 
         st.divider()
 
-        show = analysis.copy()
+        # 只保留你需要的列
+        DISPLAY_COLS = [
+            "代码", "状态", "行权价", "到期日", "剩余天数", "张数",
+            "权利金", "现价", "期权现价", "IV",
+            "浮动盈亏($)", "占用资金($)",
+            "年化收益率", "开仓年化", "行权概率", "距行权价%",
+        ]
+        show = analysis[DISPLAY_COLS].copy()
         show["年化收益率"] = show["年化收益率"].apply(fmt_pct)
         show["开仓年化"] = show["开仓年化"].apply(fmt_pct)
         show["行权概率"] = show["行权概率"].apply(fmt_pct)
@@ -315,12 +322,12 @@ with tab_overview:
 
         st.dataframe(
             show.style.format({
-                "行权价": "{:.2f}", "权利金": "{:.2f}", "现价": "{:.2f}",
-                "期权现价": "{:.2f}", "市场价": "{:.2f}",
-                "浮动盈亏($)": "{:,.0f}", "最大收益($)": "{:,.0f}",
-                "占用资金($)": "{:,.0f}", "Theta($/日)": "{:,.1f}",
-                "Vega($/1%)": "{:,.1f}", "Delta": "{:.3f}", "Gamma": "{:.4f}",
-                "盈亏平衡点": "{:.2f}", "Delta敞口($)": "{:,.0f}",
+                "行权价": "{:.2f}",
+                "权利金": "{:.2f}",
+                "现价": "{:.2f}",
+                "期权现价": "{:.2f}",
+                "浮动盈亏($)": "{:,.0f}",
+                "占用资金($)": "{:,.0f}",
             }, na_rep="—"),
             use_container_width=True, height=420,
         )
@@ -367,12 +374,12 @@ with tab_manage:
         f1, f2, f3, f4 = st.columns(4)
         new_ticker = f1.text_input("标的代码", placeholder="例如 AAPL / NVDA / SPY").upper().strip()
         new_strike = f2.number_input("行权价 ($)", min_value=0.01, value=100.0, step=1.0)
-        new_exp = f3.date_input("到期日", value=date.today())
+        new_exp = f3.date_input("到期日", value=us_today())
         new_qty = f4.number_input("张数", min_value=1, value=1, step=1)
 
         f5, f6, f7 = st.columns(3)
         new_prem = f5.number_input("权利金 / 每股 ($)", min_value=0.0, value=1.00, step=0.05)
-        new_open = f6.date_input("开仓日期", value=date.today())
+        new_open = f6.date_input("开仓日期", value=us_today())
         new_note = f7.text_input("备注", placeholder="可选")
 
         submitted = st.form_submit_button("✅ 添加持仓", use_container_width=True)
@@ -474,13 +481,12 @@ with tab_risk:
             张数=("张数", "sum"),
             占用资金=("占用资金($)", "sum"),
             浮动盈亏=("浮动盈亏($)", "sum"),
-            总Delta=("Delta敞口($)", "sum"),
             总Theta=("Theta($/日)", "sum"),
         ).reset_index()
         st.dataframe(
             agg.style.format({
                 "占用资金": "${:,.0f}", "浮动盈亏": "${:,.0f}",
-                "总Delta": "${:,.0f}", "总Theta": "${:,.1f}",
+                "总Theta": "${:,.1f}",
             }),
             use_container_width=True,
         )
@@ -495,7 +501,7 @@ with tab_data:
             "⬇️ 导出 JSON",
             data=json.dumps(json.loads(df.to_json(orient="records", force_ascii=False)),
                             ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name=f"portfolio_{datetime.today():%Y%m%d}.json",
+            file_name=f"portfolio_{us_today():%Y%m%d}.json",
             mime="application/json",
             use_container_width=True,
         )
@@ -504,7 +510,7 @@ with tab_data:
         st.download_button(
             "⬇️ 导出 CSV",
             data=df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"portfolio_{datetime.today():%Y%m%d}.csv",
+            file_name=f"portfolio_{us_today():%Y%m%d}.csv",
             mime="text/csv",
             use_container_width=True,
         )
