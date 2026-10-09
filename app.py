@@ -42,7 +42,7 @@ def save_data(df):
 if 'portfolio_data' not in st.session_state:
     st.session_state.portfolio_data = load_data()
 
-# ================= 2. 行权概率估算函数 (已完美修复 SyntaxError) =================
+# ================= 2. 行权概率估算函数 =================
 def estimate_itm_probability_v2(ticker_symbol, strike, expiration_str):
     try:
         from scipy.stats import norm
@@ -66,7 +66,7 @@ def estimate_itm_probability_v2(ticker_symbol, strike, expiration_str):
         puts = opt.puts
         
         closest_opt = puts.iloc[(puts['strike'] - strike).abs().argsort()[:1]]
-        iv = closest_opt['impliedVolatility'].values[0] if not closest_opt.empty else 0.30
+        iv = closest_opt['impliedVolatility'].values if not closest_opt.empty else 0.30
         
         if iv == 0 or np.isnan(iv): 
             iv = 0.30 
@@ -78,7 +78,7 @@ def estimate_itm_probability_v2(ticker_symbol, strike, expiration_str):
         return itm_prob, dte
         
     except:
-        # 降级容错处理：若网络原因无法精算概率，依然保留并展示天数 (DTE)
+        # 降级容错处理
         try:
             today = datetime.today().date()
             exp_date = datetime.strptime(expiration_str, "%Y-%m-%d").date()
@@ -150,7 +150,6 @@ if menu == "💼 当前持仓管理":
                     
                     price_diff_pct = ((current_price - strike) / current_price) * 100
                     
-                    # 传入真实的到期日，获得定制精准概率和剩余天数 (DTE)
                     prob, dte = estimate_itm_probability_v2(ticker_str, strike, exp_str)
                     
                     if prob is not None:
@@ -195,7 +194,6 @@ if menu == "💼 当前持仓管理":
             
         st.markdown("")
 
-        # 完美编排所有列
         cols = ['勾选删除', '股票代码', '持仓数量 (张)', '行权价 (Strike)', '单张权利金 (Credit)', '估计总权利金', '当前正股价 (Current)', '距行权安全垫 (%)', '到期日', '剩余天数 (DTE)', '预计被行权概率']
         display_df = res_df[cols]
         
@@ -223,7 +221,7 @@ if menu == "💼 当前持仓管理":
             else:
                 st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
 
-# ================= 模块二：🔍 筛选合适股票 =================
+# ================= 模块二：🔍 筛选合适股票（已全线修复缩进问题） =================
 elif menu == "🔍 筛选合适股票":
     st.title("🔍 Sell Put 潜在股票筛选神器")
     st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
@@ -250,3 +248,6 @@ elif menu == "🔍 筛选合适股票":
                         price = fast['last_price']
                         
                         if price < min_price:
+                            continue
+                            
+                        pe = info.get('trailingPE', np.nan)
