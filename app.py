@@ -45,7 +45,7 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
         if not expirations:
             return 0.5
         
-        opt = ticker.option_chain(expirations) # 取最近一个到期日进行估算
+        opt = ticker.option_chain(expirations) 
         calls_or_puts = opt.puts if is_put else opt.calls
         closest_opt = calls_or_puts.iloc[(calls_or_puts['strike'] - strike).abs().argsort()[:1]]
         if closest_opt.empty:
@@ -63,16 +63,15 @@ def estimate_itm_probability(ticker_symbol, strike, is_put=True):
     except:
         return None
 
-# ================= 3. 侧边栏功能切换菜单（已将当前持仓设为第一项/主页） =================
+# ================= 3. 侧边栏功能切换菜单 =================
 menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 筛选合适股票"])
 
-# ================= 模块一：💼 当前持仓管理（已设为默认主页） =================
-if menu == "💼 当前持仓管理":
+# ================= 模块一：💼 当前持仓管理（主页） =================
+if menu == "💼 当前持仓 management" or menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
-    st.write("您可以在这里查看实时仓位表现、计算安全垫和行权率，并使用底部的弹窗添加或一键删除单子。")
     
-    # --- 操作按钮区域：添加新持仓 ---
-    if st.button("➕ 添加新持仓（弹窗输入）"):
+    # --- 顶栏操作区：添加新持仓 ---
+    if st.button("➕ 添加新持仓"):
         st.dialog("add_position_modal") 
         
     @st.dialog("添加新持仓")
@@ -100,7 +99,7 @@ if menu == "💼 当前持仓管理":
         st.info("目前没有任何持仓数据，请点击上方按钮录入。")
     else:
         results = []
-        with st.spinner("正在获取实时股价，并利用 Black-Scholes 模型严密推算行权概率..."):
+        with st.spinner("正在获取实时股价，并严密推算行权概率..."):
             for index, row in df.iterrows():
                 ticker_str = str(row["股票代码"]).upper().strip()
                 strike = float(row["下单行权价(Strike)"])
@@ -115,7 +114,7 @@ if menu == "💼 当前持仓管理":
                     prob_str = f"{prob*100:.1f}%" if prob is not None else "无法估算"
                     
                     results.append({
-                        "ID": index,
+                        "原始索引": index, # 隐藏用作底层的真实删除凭证
                         "股票代码": ticker_str,
                         "行权价 (Strike)": strike,
                         "权利金 (Credit)": credit,
@@ -125,42 +124,50 @@ if menu == "💼 当前持仓管理":
                     })
                 except:
                     results.append({
-                        "ID": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A"
+                        "原始索引": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A"
                     })
 
         res_df = pd.DataFrame(results)
-        display_df = res_df.drop(columns=["ID"]) 
-        st.subheader("📊 实时持仓监控盘面")
-        st.dataframe(display_df, use_container_width=True)
-
-        # --- 移除单子区域 ---
-        st.markdown("---")
-        st.subheader("🗑️ 移除已结清仓位")
-        delete_list = [f"{r['股票代码']} (Strike: {r['行权价 (Strike)']})" for r in results]
-        selected_to_delete = st.selectbox("选择需要删除的持仓项：", delete_list)
         
-        if st.button("🔥 确认删除选中持仓", type="primary"):
-            selected_index = delete_list.index(selected_to_delete)
-            target_id = results[selected_index]["ID"]
-            
-            st.session_state.portfolio_data = st.session_state.portfolio_data.drop(target_id).reset_index(drop=True)
-            save_data(st.session_state.portfolio_data)
-            st.success("持仓已删除，本地存档已同步更新！")
-            st.rerun()
+        # 隐藏掉技术索引列，让用户看到的表格完全纯净
+        display_df = res_df.drop(columns=["原始索引"])
+        
+        st.subheader("📊 实时持仓监控盘面")
+        
+        # 🌟 核心升级：利用 selection_mode="multi" 让表格自带复选框
+        event = st.dataframe(
+            display_df, 
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="multi"
+        )
+        
+        # 获取用户在表格中勾选的行数
+        selected_rows = event.selection.rows
+        
+        # 🌟 如果有行被勾选，直接动态在表格下方冒出删除按钮！
+        if len(selected_rows) > 0:
+            st.markdown("")
+            if st.button(f"🗑️ 删除选中的 {len(selected_rows)} 个持仓项", type="primary"):
+                # 通过选中的相对行号，映射回真正的 portfolio 索引进行剔除
+                indices_to_drop = [res_df.iloc[r]["原始索引"] for r in selected_rows]
+                
+                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(indices_to_drop).reset_index(drop=True)
+                save_data(st.session_state.portfolio_data)
+                st.success("选中的持仓已成功移除！")
+                st.rerun()
 
 # ================= 模块二：🔍 筛选合适股票 =================
 elif menu == "🔍 筛选合适股票":
     st.title("🔍 Sell Put 潜在股票筛选神器")
-    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标，辅助评估其是否适合作为 Sell Put 标的。")
+    st.write("输入您感兴趣的股票代码，系统将帮您抓取核心行情指标。")
     
-    # 股票池输入与核心参数设定
     col_input, col_param = st.columns()
     with col_input:
-        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA, AMD）", "AAPL, TSLA, NVDA")
+        ticker_input = st.text_input("请输入股票代码（多个请用逗号隔开，例如: AAPL, TSLA, NVDA）", "AAPL, TSLA, NVDA")
     with col_param:
         min_price = st.number_input("最低股价过滤 ($)", min_value=0.0, value=50.0)
 
-    # 触发筛选按钮
     if st.button("🚀 开始抓取并筛选数据", type="primary"):
         tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
         
@@ -168,20 +175,17 @@ elif menu == "🔍 筛选合适股票":
             st.error("请输入至少一个股票代码！")
         else:
             screen_results = []
-            with st.spinner("正在连线雅虎财经，全面扫描正股指标中..."):
+            with st.spinner("正在连线雅虎财经..."):
                 for t_sym in tickers:
                     try:
                         t_obj = yf.Ticker(t_sym)
                         info = t_obj.info
                         fast = t_obj.fast_info
-                        
                         price = fast['last_price']
                         
-                        # 过滤低于设定阈值的股票
                         if price < min_price:
                             continue
                             
-                        # 安全提取雅虎财经财务/技术面指标
                         pe = info.get('trailingPE', np.nan)
                         pe_str = f"{pe:.1f}" if pd.notnull(pe) else "N/A"
                         
@@ -192,7 +196,6 @@ elif menu == "🔍 筛选合适股票":
                         beta = info.get('beta', np.nan)
                         beta_str = f"{beta:.2f}" if pd.notnull(beta) else "N/A"
                         
-                        # 简单评估建议
                         if pd.notnull(beta) and beta > 1.5:
                             advice = "⚠️ 波动剧烈 (高Beta)，权利金高但接盘风险大"
                         elif pd.notnull(pe) and pe > 50:
@@ -201,12 +204,7 @@ elif menu == "🔍 筛选合适股票":
                             advice = "✅ 适合 Sell Put (估值或波动较稳健)"
 
                         screen_results.append({
-                            "股票代码": t_sym,
-                            "当前股价": f"${price:.2f}",
-                            "市盈率 (PE)": pe_str,
-                            "52周最低价距离": dist_str,
-                            "波动率系数 (Beta)": beta_str,
-                            "策略初评建议": advice
+                            "股票代码": t_sym, "当前股价": f"${price:.2f}", "市盈率 (PE)": pe_str, "52周最低价距离": dist_str, "波动率系数 (Beta)": beta_str, "策略初评建议": advice
                         })
                     except:
                         screen_results.append({
@@ -217,4 +215,4 @@ elif menu == "🔍 筛选合适股票":
                 st.subheader("📊 扫描筛选结果透视表")
                 st.dataframe(pd.DataFrame(screen_results), use_container_width=True)
             else:
-                st.info("没有满足您所设定『最低股价过滤』条件的股票。")
+                st.info("没有满足您条件的股票。")
