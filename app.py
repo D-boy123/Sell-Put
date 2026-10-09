@@ -16,11 +16,15 @@ DB_FILE = "portfolio.json"
 RISK_FREE_RATE = 0.045
 US_TZ = ZoneInfo("America/New_York")
 
-# 扫描结果的 schema 版本号 —— 改数据结构时递增，自动作废旧缓存
-SCAN_SCHEMA_VERSION = 3
+# 评分参数（想调权重改这里）
+SPREAD_MAX = 0.15          # 买卖价差上限，超过直接淘汰
+IV_HV_FLOOR = 0.5          # IV/HV 下限，避免 HV 极端大时分数崩塌
+
+SCAN_SCHEMA_VERSION = 4
 SCAN_RESULT_COLUMNS = [
     "代码", "现价", "行权价", "距离现价%",
-    "到期日", "权利金", "年化收益率", "评分",
+    "到期日", "权利金", "年化收益率",
+    "行权概率", "IV/HV", "评分",
 ]
 
 
@@ -263,7 +267,8 @@ def fmt_money(x):
 def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
     """
     只扫描最近一期和下一期未到期的期权。
-    每个到期日找出最接近目标 OTM 的 Put，计算年化收益与综合评分。
+    每个到期日找出最接近目标 OTM 的 Put，计算：
+        评分 = 年化收益 × (1 − 行权概率) × max(IV/HV, 0.5)
     """
     mkt = fetch_market(ticker)
     if not mkt:
@@ -276,7 +281,6 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         return []
 
     today = us_today()
-    # 只取最近两期
     upcoming = []
     for exp in sorted(exps):
         try:
@@ -304,27 +308,46 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         row = puts.loc[idx]
         K = float(row["strike"])
 
+        # 报价与价差
         bid = row.get("bid", np.nan)
         ask = row.get("ask", np.nan)
         last = row.get("lastPrice", np.nan)
         if pd.notna(bid) and pd.notna(ask) and bid > 0 and ask > 0:
             mid = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / mid if mid > 0 else 0.0
         else:
             mid = last if pd.notna(last) and last > 0 else np.nan
+            spread_pct = 0.0
 
         if pd.isna(mid) or mid <= 0:
             continue
+        if spread_pct > SPREAD_MAX:           # 流动性太差，直接跳过
+            continue
 
+        # 年化收益
         ann = (mid / K) * 365.0 / dte
         if ann < min_annual:
             continue
 
+        # 波动率
         iv = row.get("impliedVolatility", np.nan)
         if pd.isna(iv) or iv <= 0:
             iv = hv if pd.notna(hv) and hv > 0 else 0.30
 
+        # 行权概率（BS 直接给出）
+        T = dte / 365.0
+        _, _, _, _, _, p_itm = bs_put(S, K, T, RISK_FREE_RATE, iv)
+        if pd.isna(p_itm):
+            p_itm = 0.5
+
+        # 波动率溢价：IV 相对 HV 的倍数
+        iv_hv = iv / hv if pd.notna(hv) and hv > 0 else 1.0
+        iv_hv = max(iv_hv, IV_HV_FLOOR)
+
+        # 综合评分
+        score = ann * (1 - p_itm) * iv_hv
+
         actual_otm = (S - K) / S
-        score = (ann * (actual_otm ** 2) / iv) if iv > 0 else np.nan
 
         results.append({
             "代码": ticker,
@@ -334,6 +357,8 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
             "到期日": exp,
             "权利金": mid,
             "年化收益率": ann,
+            "行权概率": p_itm,
+            "IV/HV": iv_hv,
             "评分": score,
         })
 
@@ -341,7 +366,6 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
 
 
 def is_valid_scan_df(res) -> bool:
-    """校验扫描结果 DataFrame 是否可安全使用（防止旧 schema 残留）"""
     if res is None:
         return False
     if not isinstance(res, pd.DataFrame):
@@ -357,7 +381,6 @@ st.title("📈 Sell Put 策略管理系统")
 if "df" not in st.session_state:
     st.session_state.df = load_data()
 
-# 检测旧版缓存：schema 版本不匹配时清空
 if st.session_state.get("scan_schema_version") != SCAN_SCHEMA_VERSION:
     st.session_state.scan_results = None
     st.session_state.scan_schema_version = SCAN_SCHEMA_VERSION
@@ -535,7 +558,8 @@ with tab_screen:
     st.subheader("🔍 Sell Put 选股扫描")
     st.caption(
         "只扫描最近一期和下一期未到期的期权。"
-        "评分 = 年化收益 × 距离现价%² ÷ 隐含波动率(IV)，分数越高越值得关注。"
+        "评分 = 年化收益 × (1 − 行权概率) × max(IV/HV, 0.5)，"
+        "买卖价差 > 15% 的机会会被自动淘汰。"
     )
 
     tickers_input = st.text_area(
@@ -563,7 +587,6 @@ with tab_screen:
         if not tickers:
             st.error("请输入至少一个标的代码")
         else:
-            # 每次都先清空旧结果，避免残留
             st.session_state.scan_results = None
             all_results = []
             progress = st.progress(0.0, text="扫描中…")
@@ -582,10 +605,8 @@ with tab_screen:
                 st.session_state.scan_results = None
                 st.warning("本次扫描没有找到符合条件的机会。")
 
-    # ---------- 展示结果（带 schema 校验，防止旧数据残留崩溃） ----------
     if st.session_state.scan_results is not None:
         if not is_valid_scan_df(st.session_state.scan_results):
-            # 旧 schema 或空数据 —— 静默清空并提示
             st.session_state.scan_results = None
             st.info("检测到旧格式的扫描结果（已自动清除），请重新点击「开始扫描」。")
         else:
@@ -604,6 +625,8 @@ with tab_screen:
                     alt.Tooltip("行权价:Q", format=".2f"),
                     alt.Tooltip("距离现价%:Q", format=".2%"),
                     alt.Tooltip("年化收益率:Q", format=".2%"),
+                    alt.Tooltip("行权概率:Q", format=".2%"),
+                    alt.Tooltip("IV/HV:Q", format=".2f"),
                     alt.Tooltip("评分:Q", format=".4f"),
                 ],
             ).properties(height=280)
@@ -612,10 +635,12 @@ with tab_screen:
             show = res.copy()
             show["距离现价%"] = show["距离现价%"].apply(fmt_pct)
             show["年化收益率"] = show["年化收益率"].apply(fmt_pct)
+            show["行权概率"] = show["行权概率"].apply(fmt_pct)
 
             cols = [
                 "代码", "现价", "行权价", "距离现价%",
-                "到期日", "权利金", "年化收益率", "评分",
+                "到期日", "权利金", "年化收益率",
+                "行权概率", "IV/HV", "评分",
             ]
 
             st.dataframe(
@@ -623,12 +648,15 @@ with tab_screen:
                     "现价": "{:.2f}",
                     "行权价": "{:.2f}",
                     "权利金": "{:.2f}",
+                    "IV/HV": "{:.2f}",
                     "评分": "{:.4f}",
                 }, na_rep="—"),
                 use_container_width=True, height=420,
             )
 
             st.caption(
-                "💡 评分公式：年化收益 × 距离现价%² ÷ IV。"
-                "距离现价% 取平方强调安全边际，除以 IV 对高波动标的做风险惩罚。"
+                "💡 评分 = 年化收益 × (1 − 行权概率) × max(IV/HV, 0.5)。"
+                "行权概率由 Black-Scholes 直接给出，比 OTM%² 精确；"
+                "IV/HV > 1 表示期权隐含波动率高于实际，卖出更划算。"
+                "已自动跳过买卖价差 > 15% 的机会。"
             )
