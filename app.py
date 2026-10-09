@@ -70,7 +70,7 @@ menu = st.sidebar.selectbox("功能菜单", ["💼 当前持仓管理", "🔍 �
 if menu == "💼 当前持仓管理":
     st.title("💼 当前持仓动态透视")
     
-    # --- 🌟 頂部操作按鈕區（添加與刪除並排在一起） ---
+    # --- 頂部操作按鈕區（添加與刪除並排在一起） ---
     btn_col1, btn_col2, btn_col3 = st.columns([1.5, 2, 6])
     
     with btn_col1:
@@ -78,7 +78,7 @@ if menu == "💼 当前持仓管理":
             st.dialog("add_position_modal") 
             
     with btn_col2:
-        # 这个删除按钮放在添加旁边，依赖于下面表格选中的行进行触发
+        # 显式的删除触发按钮
         delete_clicked = st.button("🗑️ 删除表格选中持仓", type="primary", use_container_width=True)
 
     @st.dialog("添加新持仓")
@@ -127,47 +127,46 @@ if menu == "💼 当前持仓管理":
                         "权利金 (Credit)": credit,
                         "当前估价 (Current)": round(current_price, 2),
                         "距行权安全垫 (%)": f"{price_diff_pct:.2f}%",
-                        "预计被行权概率": prob_str
+                        "预计被行权概率": prob_str,
+                        "勾选删除": False  # 显式提供复选框底层数据
                     })
                 except:
                     results.append({
-                        "原始索引": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A"
+                        "原始索引": index, "股票代码": ticker_str, "行权价 (Strike)": strike, "权利金 (Credit)": credit, "当前估价 (Current)": "获取失败", "距行权安全垫 (%)": "N/A", "预计被行权概率": "N/A", "勾选删除": False
                     })
 
         res_df = pd.DataFrame(results)
-        display_df = res_df.drop(columns=["原始索引"])
+        
+        # 重新排序列顺序，把“勾选删除”放到最前面，更符合操作习惯
+        cols = ['勾选删除', '股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率']
+        display_df = res_df[cols]
         
         st.subheader("📊 实时持仓监控盘面")
         
-        # 🌟 核心改动：采用稳定的可编辑数据框架（自带删除行选取逻辑），绝对不会爆版本错
-        # 此时左侧会有一个可以点亮选中的小复选区域
-        edited_status = st.data_editor(
+        # 利用 data_editor 渲染，只允许用户编辑“勾选删除”这一列，其余列锁定
+        edited_df = st.data_editor(
             display_df,
             use_container_width=True,
-            num_rows="fixed", # 不允许直接在表格里直接追加
-            disabled=display_df.columns, # 锁定列，不允许用户随便篡改价格
-            key="portfolio_table"
+            disabled=['股票代码', '行权价 (Strike)', '权利金 (Credit)', '当前估价 (Current)', '距行权安全垫 (%)', '预计被行权概率'],
+            key="portfolio_editor_v2"
         )
         
-        # 获取通过表格内部的操作变更
-        # 如果用户点击了顶部那个“删除选中持仓”按钮
+        # 处理删除核心逻辑
         if delete_clicked:
-            state = st.session_state.get("portfolio_table")
-            # 检查是否有行在 data_editor 中触发了删除或用户选择了需要移除的操作行为
-            # 基于老版本的习惯，直接通过行状态变化或在顶部点击删除动作执行
+            # 找出所有被勾选为 True 的行的相对索引
+            selected_indices = edited_df[edited_df["勾选删除"] == True].index.tolist()
             
-            # 寻找被用户在 editor 里的操作痕迹，如果没有高亮，提示用户
-            if "deleted_rows" in state and state["deleted_rows"]:
-                # 如果用户使用了表格原生自带的移除标记
-                indices_to_drop = [res_df.iloc[r]["原始索引"] for r in state["deleted_rows"]]
-                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(indices_to_drop).reset_index(drop=True)
+            if selected_indices:
+                # 映射回原始持仓 dataframe 的索引
+                real_indices_to_drop = [res_df.iloc[i]["原始索引"] for i in selected_indices]
+                
+                # 执行删除并写回 JSON 文件
+                st.session_state.portfolio_data = st.session_state.portfolio_data.drop(real_indices_to_drop).reset_index(drop=True)
                 save_data(st.session_state.portfolio_data)
-                st.success("选中持仓已成功移除！")
+                st.success(f"成功删除 {len(real_indices_to_drop)} 个持仓项！")
                 st.rerun()
             else:
-                # 兼容老版最丝滑的点击选取流：如果勾选了 data_editor 内的活动项（比如编辑了某行的非禁用字段或点击了选取状态）
-                # 为了极致完美，如果想删除某行，你只需在表格上方的操作或者配合 editor 的多极选择
-                st.info("💡 请先在下方表格最左侧勾选您想要删除的那一行，然后再点击顶部的『🗑️ 删除表格选中持仓』按钮。")
+                st.warning("⚠️ 请先在表格第一列中【勾选】您想要删除的股票，然后再点击顶部的『🗑️ 删除表格选中持仓』。")
 
 # ================= 模块二：🔍 筛选合适股票 =================
 elif menu == "🔍 筛选合适股票":
