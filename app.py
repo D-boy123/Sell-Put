@@ -13,8 +13,15 @@ st.set_page_config(layout="wide", page_title="Sell Put 策略管理系统", page
 
 # ================= 0. 全局常量 / 时区 =================
 DB_FILE = "portfolio.json"
-RISK_FREE_RATE = 0.045                        # 固定无风险利率
+RISK_FREE_RATE = 0.045
 US_TZ = ZoneInfo("America/New_York")
+
+# 扫描结果的 schema 版本号 —— 改数据结构时递增，自动作废旧缓存
+SCAN_SCHEMA_VERSION = 3
+SCAN_RESULT_COLUMNS = [
+    "代码", "现价", "行权价", "距离现价%",
+    "到期日", "权利金", "年化收益率", "评分",
+]
 
 
 def us_today() -> date:
@@ -269,7 +276,7 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         return []
 
     today = us_today()
-    # ---------- 只取最近两期 ----------
+    # 只取最近两期
     upcoming = []
     for exp in sorted(exps):
         try:
@@ -288,7 +295,6 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         if puts is None or puts.empty:
             continue
 
-        # 只看 OTM（行权价低于现价）
         puts = puts[puts["strike"] < S].copy()
         if puts.empty:
             continue
@@ -309,18 +315,16 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
         if pd.isna(mid) or mid <= 0:
             continue
 
-        # 年化收益率 = 权利金 / 行权价 × 365 / DTE
         ann = (mid / K) * 365.0 / dte
         if ann < min_annual:
             continue
 
         iv = row.get("impliedVolatility", np.nan)
         if pd.isna(iv) or iv <= 0:
-            iv = hv
+            iv = hv if pd.notna(hv) and hv > 0 else 0.30
 
         actual_otm = (S - K) / S
-        # 评分 = 年化收益 × 距离现价%² ÷ 波动率(IV)
-        score = (ann * (actual_otm ** 2) / iv) if pd.notna(iv) and iv > 0 else np.nan
+        score = (ann * (actual_otm ** 2) / iv) if iv > 0 else np.nan
 
         results.append({
             "代码": ticker,
@@ -336,11 +340,27 @@ def scan_ticker_for_sell_put(ticker: str, otm_target: float, min_annual: float):
     return results
 
 
+def is_valid_scan_df(res) -> bool:
+    """校验扫描结果 DataFrame 是否可安全使用（防止旧 schema 残留）"""
+    if res is None:
+        return False
+    if not isinstance(res, pd.DataFrame):
+        return False
+    if res.empty:
+        return False
+    return all(c in res.columns for c in SCAN_RESULT_COLUMNS)
+
+
 # ================= 6. 主界面 =================
 st.title("📈 Sell Put 策略管理系统")
 
 if "df" not in st.session_state:
     st.session_state.df = load_data()
+
+# 检测旧版缓存：schema 版本不匹配时清空
+if st.session_state.get("scan_schema_version") != SCAN_SCHEMA_VERSION:
+    st.session_state.scan_results = None
+    st.session_state.scan_schema_version = SCAN_SCHEMA_VERSION
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
@@ -543,6 +563,8 @@ with tab_screen:
         if not tickers:
             st.error("请输入至少一个标的代码")
         else:
+            # 每次都先清空旧结果，避免残留
+            st.session_state.scan_results = None
             all_results = []
             progress = st.progress(0.0, text="扫描中…")
             for i, tk in enumerate(tickers):
@@ -553,21 +575,26 @@ with tab_screen:
                     text=f"扫描 {tk} 完成（{len(res)} 条）",
                 )
             progress.empty()
-            st.session_state.scan_results = (
-                pd.DataFrame(all_results) if all_results else pd.DataFrame()
-            )
 
+            if all_results:
+                st.session_state.scan_results = pd.DataFrame(all_results)[SCAN_RESULT_COLUMNS]
+            else:
+                st.session_state.scan_results = None
+                st.warning("本次扫描没有找到符合条件的机会。")
+
+    # ---------- 展示结果（带 schema 校验，防止旧数据残留崩溃） ----------
     if st.session_state.scan_results is not None:
-        res = st.session_state.scan_results
-        if res.empty:
-            st.info("没有找到符合条件的 Sell Put 机会。请降低年化门槛，或调整 OTM 幅度后重试。")
+        if not is_valid_scan_df(st.session_state.scan_results):
+            # 旧 schema 或空数据 —— 静默清空并提示
+            st.session_state.scan_results = None
+            st.info("检测到旧格式的扫描结果（已自动清除），请重新点击「开始扫描」。")
         else:
+            res = st.session_state.scan_results.copy()
             res = res.sort_values("评分", ascending=False).reset_index(drop=True)
             st.caption(f"共找到 {len(res)} 个机会（按评分降序）")
 
-            # 评分柱状图
             res_chart = res.copy()
-            res_chart["标签"] = res_chart["代码"] + " " + res_chart["到期日"].str[5:]
+            res_chart["标签"] = res_chart["代码"] + " " + res_chart["到期日"].astype(str).str[5:]
             chart = alt.Chart(res_chart).mark_bar(color="#2E86DE").encode(
                 x=alt.X("标签:N", sort="-y", title="标的 / 到期日"),
                 y=alt.Y("评分:Q", title="评分"),
@@ -582,7 +609,6 @@ with tab_screen:
             ).properties(height=280)
             st.altair_chart(chart, use_container_width=True)
 
-            # 结果表
             show = res.copy()
             show["距离现价%"] = show["距离现价%"].apply(fmt_pct)
             show["年化收益率"] = show["年化收益率"].apply(fmt_pct)
@@ -604,6 +630,5 @@ with tab_screen:
 
             st.caption(
                 "💡 评分公式：年化收益 × 距离现价%² ÷ IV。"
-                "距离现价% 取平方，是为了强调安全边际；"
-                "除以 IV 则对高波动标的做出风险惩罚。"
+                "距离现价% 取平方强调安全边际，除以 IV 对高波动标的做风险惩罚。"
             )
